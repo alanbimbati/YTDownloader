@@ -96,6 +96,13 @@ def _append_sponsor(text: str, *, limit: int) -> str:
     return combined
 
 
+def _get_msg_id(m: Any) -> Optional[int]:
+    if m is None: return None
+    if isinstance(m, dict):
+        return m.get("message_id")
+    return getattr(m, "message_id", None)
+
+
 def _tg_post(method: str, data: dict, files: Optional[dict] = None, *, timeout_s: int) -> dict:
     url = f"{TG_API_BASE}/{method}"
     resp = requests.post(url, data=data, files=files, timeout=(apihelper.CONNECT_TIMEOUT, timeout_s))
@@ -994,8 +1001,9 @@ def handle_unsub(message: types.Message) -> None:
         return
         
     url = raw[1].strip()
+    title = storage.get_channel_title(DB_PATH, url) or url
     if storage.remove_subscription(DB_PATH, message.from_user.id, url):
-        bot.send_message(message.chat.id, _append_sponsor(f"Iscrizione rimossa per: {url}", limit=TEXT_LIMIT), reply_to_message_id=_get_msg_id(message))
+        bot.send_message(message.chat.id, _append_sponsor(f"Iscrizione rimossa per: {title}", limit=TEXT_LIMIT), reply_to_message_id=_get_msg_id(message))
     else:
         bot.send_message(message.chat.id, _append_sponsor("Non risulti iscritto a questo canale.", limit=TEXT_LIMIT), reply_to_message_id=_get_msg_id(message))
 
@@ -1066,8 +1074,9 @@ def handle_sub_callbacks(call: types.CallbackQuery) -> None:
             page = int(parts[3])
             url = storage.get_url_cache(DB_PATH, url_id)
             if url:
+                title = storage.get_channel_title(DB_PATH, url) or url
                 storage.remove_subscription(DB_PATH, call.from_user.id, url)
-                bot.answer_callback_query(call.id, "Iscrizione cancellata!")
+                bot.answer_callback_query(call.id, f"Iscrizione rimossa: {title}")
             else:
                 bot.answer_callback_query(call.id, "Errore: non trovata in cache.")
             

@@ -365,6 +365,12 @@ def remove_subscription(db_path: str, user_id: int, channel_url: str) -> bool:
         return cur.rowcount > 0
 
 
+def get_channel_title(db_path: str, channel_url: str) -> Optional[str]:
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT channel_title FROM channels_state WHERE channel_url=?", (channel_url,)).fetchone()
+    return row[0] if row else None
+
+
 def get_user_subscriptions(db_path: str, user_id: int) -> list[str]:
     with _connect(db_path) as conn:
         rows = conn.execute("SELECT channel_url FROM subscriptions WHERE user_id=?", (user_id,)).fetchall()
