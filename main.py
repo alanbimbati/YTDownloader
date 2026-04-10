@@ -210,6 +210,13 @@ def _user_label(user: Any) -> str:
 
 
 def _ensure_authorized(message: types.Message) -> bool:
+    if message.from_user:
+        storage.upsert_user(
+            DB_PATH, 
+            message.from_user.id, 
+            message.from_user.first_name or "Utente", 
+            message.from_user.username or ""
+        )
     # Il bot è ora accessibile a tutti, quindi ritorniamo sempre True
     return True
 
@@ -853,11 +860,22 @@ def handle_report(message: types.Message) -> None:
     text += f"Utenti Unici: {stats['unique_users']}\n"
     text += f"Iscrizioni Totali: {stats['total_subscriptions']}\n\n"
     text += "🕒 **Ultimi 10 download:**\n"
-    for u_id, y_id, ts in stats['recent_downloads']:
+    
+    for u_id, y_id, title, ts, first_name, username in stats['recent_downloads']:
         dt = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))
-        text += f"- `[{dt}]` Utente `{u_id}` -> Video `{y_id}`\n"
+        user_label = first_name or str(u_id)
+        if username:
+            user_label += f" (@{username})"
         
-    bot.reply_to(message, _append_sponsor(text, limit=TEXT_LIMIT), parse_mode="Markdown")
+        # Markdown Link: [Title](URL)
+        video_url = f"https://www.youtube.com/watch?v={y_id}" if len(y_id) == 11 else f"https://youtu.be/{y_id}"
+        # For non-YT videos, yt_id might be different, but ytdlp IDs are generally good enough for links if we assume YT.
+        # However, to be safe, we just link to the ID if it looks like YT, otherwise just show title.
+        link_md = f"[{title}]({video_url})" if title else f"`{y_id}`"
+        
+        text += f"- `[{dt}]` {user_label} -> {link_md}\n"
+        
+    bot.send_message(message.chat.id, _append_sponsor(text, limit=TEXT_LIMIT), parse_mode="Markdown", reply_to_message_id=_get_msg_id(message))
 
 @bot.message_handler(commands=["broadcast"])
 def handle_broadcast(message: types.Message) -> None:
@@ -1209,7 +1227,7 @@ def _process_download(task: DownloadTask) -> None:
                     caption=_append_sponsor("🎵 Audio (cache)", limit=CAPTION_LIMIT),
                 )
             
-            storage.log_download(DB_PATH, message.from_user.id, yt_id)
+            storage.log_download(DB_PATH, message.from_user.id, yt_id, yt_title=title)
             if message.from_user.id != ADMIN_USER_ID:
                 bot.send_message(
                     ADMIN_USER_ID,
@@ -1263,7 +1281,7 @@ def _process_download(task: DownloadTask) -> None:
                     audio_file_id=_file_id_from_result(msg_audio, "audio"),
                 )
             
-            storage.log_download(DB_PATH, message.from_user.id, yt_id)
+            storage.log_download(DB_PATH, message.from_user.id, yt_id, yt_title=title)
             if message.from_user.id != ADMIN_USER_ID:
                 bot.send_message(
                     ADMIN_USER_ID,

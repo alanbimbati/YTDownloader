@@ -66,7 +66,18 @@ def init_db(db_path: str) -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 yt_id TEXT NOT NULL,
+                yt_title TEXT,
                 downloaded_at INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                first_name TEXT,
+                username TEXT,
+                last_seen INTEGER NOT NULL
             )
             """
         )
@@ -279,15 +290,31 @@ def add_pending(db_path: str, user_id: int, username: str) -> None:
         )
 
 
-def log_download(db_path: str, user_id: int, yt_id: str) -> None:
+def upsert_user(db_path: str, user_id: int, first_name: str, username: str) -> None:
     now = int(time.time())
     with _connect(db_path) as conn:
         conn.execute(
             """
-            INSERT INTO downloads_log (user_id, yt_id, downloaded_at)
-            VALUES (?, ?, ?)
+            INSERT INTO users (user_id, first_name, username, last_seen)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                first_name=excluded.first_name,
+                username=excluded.username,
+                last_seen=excluded.last_seen
             """,
-            (user_id, yt_id, now),
+            (user_id, first_name, username, now),
+        )
+
+
+def log_download(db_path: str, user_id: int, yt_id: str, yt_title: Optional[str] = None) -> None:
+    now = int(time.time())
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO downloads_log (user_id, yt_id, yt_title, downloaded_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (user_id, yt_id, yt_title or "Video", now),
         )
 
 
@@ -296,7 +323,12 @@ def get_report_stats(db_path: str) -> dict:
         total_downloads = conn.execute("SELECT COUNT(*) FROM downloads_log").fetchone()[0]
         unique_users = conn.execute("SELECT COUNT(DISTINCT user_id) FROM downloads_log").fetchone()[0]
         recent = conn.execute(
-            "SELECT user_id, yt_id, downloaded_at FROM downloads_log ORDER BY downloaded_at DESC LIMIT 10"
+            """
+            SELECT l.user_id, l.yt_id, l.yt_title, l.downloaded_at, u.first_name, u.username
+            FROM downloads_log l
+            LEFT JOIN users u ON l.user_id = u.user_id
+            ORDER BY l.downloaded_at DESC LIMIT 10
+            """
         ).fetchall()
         
         subs_count = conn.execute("SELECT COUNT(*) FROM subscriptions").fetchone()[0]
