@@ -946,12 +946,21 @@ def handle_sub(message: types.Message) -> None:
         return
         
     url = raw[1].strip()
-    if not _is_youtube_url(url):
-        bot.reply_to(message, _append_sponsor("Inserisci un URL valido di YouTube.", limit=TEXT_LIMIT))
+    if not _is_supported_url(url):
+        bot.reply_to(message, _append_sponsor("Inserisci un URL valido.", limit=TEXT_LIMIT))
         return
         
+    # Get channel title
+    try:
+        with yt_dlp.YoutubeDL({"quiet": True}) as ydl:
+            c_info = ydl.extract_info(url, download=False)
+            title = c_info.get("channel") or c_info.get("title") or url
+            storage.update_channel_state(DB_PATH, url, channel_title=title)
+    except Exception:
+        title = url
+        
     if storage.add_subscription(DB_PATH, message.from_user.id, url):
-        bot.reply_to(message, _append_sponsor(f"Iscrizione completata per: {url}\nRiceverai notifiche per i nuovi video.", limit=TEXT_LIMIT))
+        bot.reply_to(message, _append_sponsor(f"Iscrizione completata per: {title}\nRiceverai notifiche per i nuovi video.", limit=TEXT_LIMIT))
     else:
         bot.reply_to(message, _append_sponsor("Sei già iscritto a questo canale.", limit=TEXT_LIMIT))
 
@@ -977,7 +986,7 @@ def handle_mysubs(message: types.Message) -> None:
     render_subs_page(message.chat.id, message.from_user.id, 0)
 
 def render_subs_page(chat_id: int, user_id: int, page: int, message_id_to_edit: Optional[int] = None) -> None:
-    subs = storage.get_user_subscriptions(DB_PATH, user_id)
+    subs = storage.get_user_subscriptions_with_titles(DB_PATH, user_id)
     if not subs:
         text = "Non sei iscritto a nessun canale. Usa ➕ Nuova Iscrizione per aggiungerne uno."
         if message_id_to_edit:
@@ -998,9 +1007,9 @@ def render_subs_page(chat_id: int, user_id: int, page: int, message_id_to_edit: 
     page_subs = subs[start_idx:end_idx]
     
     kb = types.InlineKeyboardMarkup(row_width=1)
-    for url in page_subs:
+    for url, title in page_subs:
         url_id = storage.save_url_cache(DB_PATH, url)
-        display_name = (url.split("youtube.com/")[-1] if "youtube.com/" in url else url.split("youtu.be/")[-1])[:30]
+        display_name = title[:30]
         kb.add(types.InlineKeyboardButton(f"🗑️ Cancella {display_name}", callback_data=f"sub:rm:{url_id}:{page}"))
         
     nav_buttons = []
@@ -1260,9 +1269,14 @@ def _process_download(task: DownloadTask) -> None:
                 )
                 
         sent_ids = []
-        if msg_photo: sent_ids.append(msg_photo.message_id)
-        if msg_video: sent_ids.append(msg_video.message_id)
-        if msg_audio: sent_ids.append(msg_audio.message_id)
+        if isinstance(msg_photo, dict) and msg_photo.get("message_id"): sent_ids.append(msg_photo["message_id"])
+        elif hasattr(msg_photo, "message_id"): sent_ids.append(msg_photo.message_id)
+
+        if isinstance(msg_video, dict) and msg_video.get("message_id"): sent_ids.append(msg_video["message_id"])
+        elif hasattr(msg_video, "message_id"): sent_ids.append(msg_video.message_id)
+
+        if isinstance(msg_audio, dict) and msg_audio.get("message_id"): sent_ids.append(msg_audio["message_id"])
+        elif hasattr(msg_audio, "message_id"): sent_ids.append(msg_audio.message_id)
 
         # Forward to channel if keywords match
         caption = title.lower()
@@ -1338,11 +1352,16 @@ def poll_subscriptions():
                         latest_url = latest_video.get("url") or f"https://www.youtube.com/watch?v={latest_id}"
                         
                         last_saved_id = storage.get_channel_state(DB_PATH, channel_url)
+                        # Store channel title if it's the first time
+                        c_title = info.get("channel") or info.get("title")
+                        
                         if latest_id and latest_id != last_saved_id:
-                            storage.update_channel_state(DB_PATH, channel_url, latest_id)
+                            storage.update_channel_state(DB_PATH, channel_url, latest_id, channel_title=c_title)
                             # Only notify if it's not the first time checking
                             if last_saved_id is not None:
-                                notify_subscribers(channel_url, latest_url)
+                                notify_subscribers(channel_url, latest_url, c_title)
+                        elif c_title:
+                             storage.update_channel_state(DB_PATH, channel_url, channel_title=c_title)
                 except Exception as e:
                     print(f"Errore polling canale {channel_url}: {e}")
         except Exception as e:
@@ -1351,17 +1370,18 @@ def poll_subscriptions():
         time.sleep(600)  # Controlla ogni 10 minuti
 
 
-def notify_subscribers(channel_url: str, video_url: str):
+def notify_subscribers(channel_url: str, video_url: str, channel_title: Optional[str] = None):
     subs = storage.get_all_subscriptions(DB_PATH)
     target_users = [u for u, c in subs if c == channel_url]
     if not target_users:
         return
         
+    display_name = channel_title or channel_url
     for user_id in target_users:
         try:
             bot.send_message(
                 user_id,
-                _append_sponsor(f"🔔 Nuovo video dal canale {channel_url}!\nVerrà scaricato automaticamente.", limit=TEXT_LIMIT)
+                _append_sponsor(f"🔔 Nuovo video dal canale {display_name}!\nVerrà scaricato automaticamente.", limit=TEXT_LIMIT)
             )
             # Create a fake message object to pass to the queue
             fake_message = types.Message(

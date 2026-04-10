@@ -84,6 +84,7 @@ def init_db(db_path: str) -> None:
             CREATE TABLE IF NOT EXISTS channels_state (
                 channel_url TEXT PRIMARY KEY,
                 last_video_id TEXT,
+                channel_title TEXT,
                 updated_at INTEGER NOT NULL
             )
             """
@@ -337,6 +338,19 @@ def get_user_subscriptions(db_path: str, user_id: int) -> list[str]:
         rows = conn.execute("SELECT channel_url FROM subscriptions WHERE user_id=?", (user_id,)).fetchall()
     return [r[0] for r in rows]
 
+def get_user_subscriptions_with_titles(db_path: str, user_id: int) -> list[tuple[str, str]]:
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT s.channel_url, cs.channel_title 
+            FROM subscriptions s
+            LEFT JOIN channels_state cs ON s.channel_url = cs.channel_url
+            WHERE s.user_id = ?
+            """,
+            (user_id,)
+        ).fetchall()
+    return [(r[0], r[1] or r[0]) for r in rows]
+
 
 def get_all_subscriptions(db_path: str) -> list[tuple[int, str]]:
     with _connect(db_path) as conn:
@@ -360,17 +374,25 @@ def get_channel_state(db_path: str, channel_url: str) -> Optional[str]:
     return None
 
 
-def update_channel_state(db_path: str, channel_url: str, last_video_id: str) -> None:
+def update_channel_state(db_path: str, channel_url: str, last_video_id: Optional[str] = None, channel_title: Optional[str] = None) -> None:
     now = int(time.time())
     with _connect(db_path) as conn:
+        # Get existing values if not provided
+        if last_video_id is None or channel_title is None:
+            row = conn.execute("SELECT last_video_id, channel_title FROM channels_state WHERE channel_url=?", (channel_url,)).fetchone()
+            if row:
+                if last_video_id is None: last_video_id = row[0]
+                if channel_title is None: channel_title = row[1]
+
         conn.execute(
             """
-            INSERT INTO channels_state (channel_url, last_video_id, updated_at)
-            VALUES (?, ?, ?)
+            INSERT INTO channels_state (channel_url, last_video_id, channel_title, updated_at)
+            VALUES (?, ?, ?, ?)
             ON CONFLICT(channel_url) DO UPDATE SET
                 last_video_id=excluded.last_video_id,
+                channel_title=excluded.channel_title,
                 updated_at=excluded.updated_at
             """,
-            (channel_url, last_video_id, now),
+            (channel_url, last_video_id, channel_title, now),
         )
 
