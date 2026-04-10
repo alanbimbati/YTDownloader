@@ -796,14 +796,15 @@ def main_menu_keyboard():
 def handle_start(message: types.Message) -> None:
     if not _ensure_authorized(message):
         return
-    bot.reply_to(
-        message,
+    bot.send_message(
+        message.chat.id,
         _append_sponsor(
             "Incolla un link qui (supporto Youtube, TikTok, IG Reels, Twitter/X, Reddit!) e scegli cosa scaricare.\n\n"
             "Usa il menu in basso per gestire le iscrizioni o accedere agli strumenti extra.",
             limit=TEXT_LIMIT,
         ),
-        reply_markup=main_menu_keyboard()
+        reply_markup=main_menu_keyboard(),
+        reply_to_message_id=_get_msg_id(message)
     )
 
 @bot.message_handler(func=lambda m: m.text == "➕ Nuova Iscrizione")
@@ -897,7 +898,7 @@ def handle_fwd_choice(call: types.CallbackQuery) -> None:
         if not fwd_data:
             bot.answer_callback_query(call.id, "Approvazione già gestita o scaduta.")
             try:
-                bot.delete_message(call.message.chat.id, call.message.message_id)
+                bot.delete_message(call.message.chat.id, _get_msg_id(call.message))
             except Exception:
                 pass
             return
@@ -941,28 +942,29 @@ def handle_sub(message: types.Message) -> None:
     if not _ensure_authorized(message):
         return
     raw = (message.text or "").split(maxsplit=1)
-    if len(raw) < 2 or not raw[1].strip():
-        bot.reply_to(message, _append_sponsor("Uso: /sub URL_CANALE_YOUTUBE", limit=TEXT_LIMIT))
+    if not raw[1].strip():
+        bot.send_message(message.chat.id, _append_sponsor("Uso: /sub URL_CANALE_YOUTUBE", limit=TEXT_LIMIT), reply_to_message_id=_get_msg_id(message))
         return
         
     url = raw[1].strip()
     if not _is_supported_url(url):
-        bot.reply_to(message, _append_sponsor("Inserisci un URL valido.", limit=TEXT_LIMIT))
+        bot.send_message(message.chat.id, _append_sponsor("Inserisci un URL valido.", limit=TEXT_LIMIT), reply_to_message_id=_get_msg_id(message))
         return
         
     # Get channel title
+    title = url
     try:
-        with yt_dlp.YoutubeDL({"quiet": True}) as ydl:
+        with yt_dlp.YoutubeDL({"quiet": True, "noplaylist": True, "extract_flat": True}) as ydl:
             c_info = ydl.extract_info(url, download=False)
             title = c_info.get("channel") or c_info.get("title") or url
             storage.update_channel_state(DB_PATH, url, channel_title=title)
-    except Exception:
-        title = url
+    except Exception as e:
+        print(f"Errore recupero titolo canale: {e}")
         
     if storage.add_subscription(DB_PATH, message.from_user.id, url):
-        bot.reply_to(message, _append_sponsor(f"Iscrizione completata per: {title}\nRiceverai notifiche per i nuovi video.", limit=TEXT_LIMIT))
+        bot.send_message(message.chat.id, _append_sponsor(f"Iscrizione completata per: {title}\nRiceverai notifiche per i nuovi video.", limit=TEXT_LIMIT), reply_to_message_id=_get_msg_id(message))
     else:
-        bot.reply_to(message, _append_sponsor("Sei già iscritto a questo canale.", limit=TEXT_LIMIT))
+        bot.send_message(message.chat.id, _append_sponsor("Sei già iscritto a questo canale.", limit=TEXT_LIMIT), reply_to_message_id=_get_msg_id(message))
 
 @bot.message_handler(commands=["unsub"])
 def handle_unsub(message: types.Message) -> None:
@@ -975,9 +977,9 @@ def handle_unsub(message: types.Message) -> None:
         
     url = raw[1].strip()
     if storage.remove_subscription(DB_PATH, message.from_user.id, url):
-        bot.reply_to(message, _append_sponsor(f"Iscrizione rimossa per: {url}", limit=TEXT_LIMIT))
+        bot.send_message(message.chat.id, _append_sponsor(f"Iscrizione rimossa per: {url}", limit=TEXT_LIMIT), reply_to_message_id=_get_msg_id(message))
     else:
-        bot.reply_to(message, _append_sponsor("Non risulti iscritto a questo canale.", limit=TEXT_LIMIT))
+        bot.send_message(message.chat.id, _append_sponsor("Non risulti iscritto a questo canale.", limit=TEXT_LIMIT), reply_to_message_id=_get_msg_id(message))
 
 @bot.message_handler(commands=["mysubs"])
 def handle_mysubs(message: types.Message) -> None:
@@ -1038,7 +1040,7 @@ def handle_sub_callbacks(call: types.CallbackQuery) -> None:
         
         if action == "pg":
             page = int(parts[2])
-            render_subs_page(call.message.chat.id, call.from_user.id, page, call.message.message_id)
+            render_subs_page(call.message.chat.id, call.from_user.id, page, _get_msg_id(call.message))
             bot.answer_callback_query(call.id)
             
         elif action == "rm":
@@ -1051,7 +1053,7 @@ def handle_sub_callbacks(call: types.CallbackQuery) -> None:
             else:
                 bot.answer_callback_query(call.id, "Errore: non trovata in cache.")
             
-            render_subs_page(call.message.chat.id, call.from_user.id, page, call.message.message_id)
+            render_subs_page(call.message.chat.id, call.from_user.id, page, _get_msg_id(call.message))
             
     except Exception as e:
         try: bot.answer_callback_query(call.id, "Errore interno.")
@@ -1107,7 +1109,7 @@ def handle_download(message: types.Message) -> None:
         types.InlineKeyboardButton("🎬 Solo Video", callback_data=f"dl:V:{url_id}"),
         types.InlineKeyboardButton("📽️ Entrambi", callback_data=f"dl:B:{url_id}")
     )
-    bot.reply_to(message, _append_sponsor("Scegli un formato:", limit=TEXT_LIMIT), reply_markup=kb)
+    bot.send_message(message.chat.id, _append_sponsor("Scegli un formato:", limit=TEXT_LIMIT), reply_markup=kb, reply_to_message_id=_get_msg_id(message))
 
 @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("dl:"))
 def handle_dl_choice(call: types.CallbackQuery) -> None:
@@ -1123,7 +1125,7 @@ def handle_dl_choice(call: types.CallbackQuery) -> None:
             
         bot.answer_callback_query(call.id, "Aggiunto in coda!")
         try:
-            bot.delete_message(call.message.chat.id, call.message.message_id) # remove keyboard msg
+            bot.delete_message(call.message.chat.id, _get_msg_id(call.message)) # remove keyboard msg
         except Exception:
             pass
             
@@ -1132,7 +1134,7 @@ def handle_dl_choice(call: types.CallbackQuery) -> None:
         bot.send_message(
             call.message.chat.id, 
             _append_sponsor(f"⏳ Richiesta accodata. Posizione stimata: {qsize + 1}...", limit=TEXT_LIMIT),
-            reply_to_message_id=original_message.message_id
+            reply_to_message_id=_get_msg_id(original_message)
         )
         download_queue.put(DownloadTask(original_message, url, mode))
     except Exception as e:
