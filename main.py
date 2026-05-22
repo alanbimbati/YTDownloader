@@ -1178,10 +1178,11 @@ def _process_download(task: DownloadTask) -> None:
     thumb_path = None
 
     try:
+        msg_id = _get_msg_id(message)
         status = bot.send_message(
             message.chat.id, 
             _append_sponsor("⏳ Sto preparando download e invio…", limit=TEXT_LIMIT),
-            reply_to_message_id=message.message_id
+            reply_to_message_id=msg_id if msg_id and msg_id > 0 else None
         )
 
         preview_opts = {"quiet": True, "noplaylist": True}
@@ -1338,9 +1339,11 @@ def _process_download(task: DownloadTask) -> None:
             bot.delete_message(message.chat.id, status.message_id)
 
     except Exception as e:
-        bot.reply_to(
-            message,
+        msg_id = _get_msg_id(message)
+        bot.send_message(
+            message.chat.id,
             _append_sponsor(f"Errore: {str(e)}", limit=TEXT_LIMIT),
+            reply_to_message_id=msg_id if msg_id and msg_id > 0 else None
         )
     finally:
         for p in (video_path, audio_path, thumb_path):
@@ -1385,6 +1388,7 @@ def poll_subscriptions():
                         c_title = info.get("channel") or info.get("title")
                         
                         if latest_id and latest_id != last_saved_id:
+                            print(f"[Polling] Nuovo video trovato per {c_title or channel_url}: {latest_id}")
                             storage.update_channel_state(DB_PATH, channel_url, latest_id, channel_title=c_title)
                             # Only notify if it's not the first time checking
                             if last_saved_id is not None:
@@ -1408,11 +1412,11 @@ def notify_subscribers(channel_url: str, video_url: str, channel_title: Optional
     display_name = channel_title or channel_url
     for user_id in target_users:
         try:
-            bot.send_message(
-                user_id,
-                _append_sponsor(f"🔔 Nuovo video dal canale {display_name}!\nVerrà scaricato automaticamente.", limit=TEXT_LIMIT)
-            )
-            # Create a fake message object to pass to the queue
+            text = f"🔔 Nuovo video dal canale {display_name}!\nVerrà scaricato automaticamente."
+            bot.send_message(user_id, _append_sponsor(text, limit=TEXT_LIMIT))
+            
+            # Create a fake message object for the background download
+            # We use message_id=-1 or 0 to indicate a background task
             fake_message = types.Message(
                 message_id=0,
                 from_user=types.User(id=user_id, is_bot=False, first_name="Sub", username="sub"),

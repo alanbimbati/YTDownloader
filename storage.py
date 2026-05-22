@@ -113,10 +113,22 @@ def init_db(db_path: str) -> None:
             CREATE TABLE IF NOT EXISTS pending_forwards (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id TEXT NOT NULL,
-                msg_ids TEXT NOT NULL
+                msg_ids TEXT NOT NULL,
+                created_at INTEGER NOT NULL
             )
             """
         )
+
+        # Migrations
+        try:
+            conn.execute("ALTER TABLE downloads_log ADD COLUMN yt_title TEXT")
+        except sqlite3.OperationalError:
+            pass # already exists
+
+        try:
+            conn.execute("ALTER TABLE channels_state ADD COLUMN channel_title TEXT")
+        except sqlite3.OperationalError:
+            pass # already exists
 
 
 def get_unique_users(db_path: str) -> list[int]:
