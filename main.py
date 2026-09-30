@@ -2,6 +2,7 @@ import os
 import re
 import time
 import mimetypes
+import subprocess
 from typing import Any, Optional
 import queue
 import threading
@@ -129,19 +130,41 @@ def _guess_mime(file_path: str, default: str) -> str:
     return mt or default
 
 
-def _tg_send_video_file(chat_id: int, file_path: str, caption: str) -> dict:
+def _tg_send_video_file(
+    chat_id: int,
+    file_path: str,
+    caption: str,
+    *,
+    thumb_path: Optional[str] = None,
+    duration: Optional[int] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+) -> dict:
     filename = "video.mp4"
     mime = _guess_mime(file_path, "video/mp4")
+    data = {"chat_id": str(chat_id), "caption": caption, "supports_streaming": "true"}
+    # Senza questi Telegram deve indovinare il frame di copertina, e spesso ne pesca uno nero.
+    if duration:
+        data["duration"] = str(int(duration))
+    if width:
+        data["width"] = str(int(width))
+    if height:
+        data["height"] = str(int(height))
+
     with open(file_path, "rb") as f:
         if not f.read(1):
             raise ValueError("File video vuoto (stream).")
         f.seek(0)
-        return _tg_post(
-            "sendVideo",
-            {"chat_id": str(chat_id), "caption": caption, "supports_streaming": "true"},
-            files={"video": (filename, f, mime)},
-            timeout_s=60 * 20,
-        )
+        files = {"video": (filename, f, mime)}
+        thumb_f = None
+        try:
+            if thumb_path and os.path.exists(thumb_path):
+                thumb_f = open(thumb_path, "rb")
+                files["thumbnail"] = ("thumb.jpg", thumb_f, "image/jpeg")
+            return _tg_post("sendVideo", data, files=files, timeout_s=60 * 20)
+        finally:
+            if thumb_f:
+                thumb_f.close()
 
 
 def _tg_send_document_file(chat_id: int, file_path: str, caption: str) -> dict:
@@ -159,19 +182,45 @@ def _tg_send_document_file(chat_id: int, file_path: str, caption: str) -> dict:
         )
 
 
-def _tg_send_audio_file(chat_id: int, file_path: str, caption: str, title: str) -> dict:
-    filename = "audio" + (os.path.splitext(file_path)[1] or ".m4a")
-    mime = _guess_mime(file_path, "audio/m4a")
+def _tg_send_audio_file(
+    chat_id: int,
+    file_path: str,
+    caption: str,
+    title: str,
+    *,
+    thumb_path: Optional[str] = None,
+    duration: Optional[int] = None,
+    performer: Optional[str] = None,
+) -> dict:
+    ext = os.path.splitext(file_path)[1].lower() or ".mp3"
+    # Il nome che il telefono propone al salvataggio: deve avere l'estensione giusta.
+    filename = f"{_safe_filename(title)}{ext}"
+    mime = "audio/mpeg" if ext == ".mp3" else _guess_mime(file_path, "audio/mp4")
+    data = {"chat_id": str(chat_id), "caption": caption, "title": title}
+    if duration:
+        data["duration"] = str(int(duration))
+    if performer:
+        data["performer"] = performer[:64]
+
     with open(file_path, "rb") as f:
         if not f.read(1):
             raise ValueError("File audio vuoto (stream).")
         f.seek(0)
-        return _tg_post(
-            "sendAudio",
-            {"chat_id": str(chat_id), "caption": caption, "title": title},
-            files={"audio": (filename, f, mime)},
-            timeout_s=60 * 20,
-        )
+        files = {"audio": (filename, f, mime)}
+        thumb_f = None
+        try:
+            if thumb_path and os.path.exists(thumb_path):
+                thumb_f = open(thumb_path, "rb")
+                files["thumbnail"] = ("thumb.jpg", thumb_f, "image/jpeg")
+            return _tg_post("sendAudio", data, files=files, timeout_s=60 * 20)
+        finally:
+            if thumb_f:
+                thumb_f.close()
+
+
+def _safe_filename(title: str, max_len: int = 60) -> str:
+    cleaned = re.sub(r'[\\/:*?"<>|\r\n]+', " ", title or "audio").strip()
+    return (cleaned[:max_len].strip() or "audio")
 
 
 def _tg_send_photo(chat_id: int, photo: str, caption: str) -> dict:
@@ -233,6 +282,24 @@ def _bitcoin_terms_in(info: dict) -> list[str]:
     fields += [str(c) for c in (info.get("categories") or [])]
     found = {m.group(1).lower() for m in _BITCOIN_RE.finditer("\n".join(fields))}
     return sorted(found)
+
+
+def _publish_to_channel(from_chat_id, msg_ids: list[int], sticker_file_id: Optional[str] = None) -> None:
+    try:
+        if not sticker_file_id:
+            sticker_set = bot.get_sticker_set("BitcoinPodcast")
+            if sticker_set.stickers:
+                sticker_file_id = sticker_set.stickers[0].file_id
+        if sticker_file_id:
+            bot.send_sticker(BITCOIN_CHANNEL, sticker_file_id)
+    except Exception:
+        pass
+
+    for m_id in msg_ids:
+        try:
+            bot.copy_message(BITCOIN_CHANNEL, from_chat_id, m_id)
+        except Exception as e:
+            print(f"Pubblicazione sul canale fallita per {m_id}: {e}")
 
 
 def _propose_channel_publication(message: types.Message, title: str, terms: list[str], msg_ids: list[int]) -> None:
@@ -1057,16 +1124,35 @@ def _download_audio(url: str, yt_id: str, info: dict) -> str:
         "noplaylist": True,
         "format": fmt,
         "max_filesize": EFFECTIVE_MAX_UPLOAD_BYTES,
+        # Il flusso nativo di YouTube è opus/webm: i lettori dei telefoni lo trattano male
+        # e non lo salvano come brano. Ricodifichiamo in mp3, con tag e copertina dentro.
+        "postprocessors": [
+            {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"},
+            {"key": "FFmpegMetadata"},
+            {"key": "EmbedThumbnail"},
+        ],
+        "writethumbnail": True,
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.extract_info(url, download=True)
-    preferred_exts = (".m4a", ".webm", ".mp4", ".mp3", ".aac", ".opus", ".ogg")
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.extract_info(url, download=True)
+    except Exception as e:
+        print(f"Conversione mp3 fallita, ripiego sul flusso originale: {e}")
+        ydl_opts.pop("postprocessors", None)
+        ydl_opts.pop("writethumbnail", None)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.extract_info(url, download=True)
+
+    preferred_exts = (".mp3", ".m4a", ".webm", ".mp4", ".aac", ".opus", ".ogg")
     candidates = [
         os.path.join(DOWNLOAD_DIR, n)
         for n in os.listdir(DOWNLOAD_DIR)
         if n.startswith(prefix) and n.endswith(preferred_exts) and not n.endswith(".part")
     ]
-    if candidates:
+    mp3 = [c for c in candidates if c.lower().endswith(".mp3")]
+    if mp3:
+        path = max(mp3, key=lambda p: os.path.getmtime(p))
+    elif candidates:
         path = max(candidates, key=lambda p: os.path.getmtime(p))
     else:
         waited = _wait_for_completed_download(prefix, timeout_s=2.0)
@@ -1125,7 +1211,43 @@ def _send_with_retry(fn, *args, **kwargs):
         raise last_exc
 
 
-def _send_video_or_document(chat_id: int, file_path: str, caption: str):
+def _prepare_thumbnail(thumb_url: str, yt_id: str) -> Optional[str]:
+    """Miniatura per sendVideo/sendAudio: Telegram la vuole jpeg, max 320px e sotto i 200KB."""
+    if not thumb_url:
+        return None
+    raw_path = os.path.join(DOWNLOAD_DIR, f"{yt_id}_thumb.jpg")
+    small_path = os.path.join(DOWNLOAD_DIR, f"{yt_id}_thumb_small.jpg")
+    try:
+        if not os.path.exists(raw_path) or os.path.getsize(raw_path) <= 0:
+            r = requests.get(thumb_url, timeout=30)
+            r.raise_for_status()
+            if not r.content:
+                return None
+            with open(raw_path, "wb") as f:
+                f.write(r.content)
+
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", raw_path,
+             "-vf", "scale=320:-2", "-q:v", "6", small_path],
+            check=True, timeout=60,
+        )
+        if os.path.getsize(small_path) < 200 * 1024:
+            return small_path
+    except Exception as e:
+        print(f"Miniatura non preparata: {e}")
+    return None
+
+
+def _send_video_or_document(
+    chat_id: int,
+    file_path: str,
+    caption: str,
+    *,
+    thumb_path: Optional[str] = None,
+    duration: Optional[int] = None,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+):
     caption = _append_sponsor(caption, limit=CAPTION_LIMIT)
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File non trovato: {file_path}")
@@ -1137,7 +1259,10 @@ def _send_video_or_document(chat_id: int, file_path: str, caption: str):
     last_exc: Optional[Exception] = None
     for attempt in range(1, 6):
         try:
-            return _tg_send_video_file(chat_id, file_path, caption)
+            return _tg_send_video_file(
+                chat_id, file_path, caption,
+                thumb_path=thumb_path, duration=duration, width=width, height=height,
+            )
         except Exception as e:
             last_exc = e
             # Se Telegram dice che il file è vuoto, come fallback prova come documento.
@@ -1160,7 +1285,16 @@ def _send_video_or_document(chat_id: int, file_path: str, caption: str):
         raise last_exc
 
 
-def _send_audio(chat_id: int, file_path: str, caption: str, title: str):
+def _send_audio(
+    chat_id: int,
+    file_path: str,
+    caption: str,
+    title: str,
+    *,
+    thumb_path: Optional[str] = None,
+    duration: Optional[int] = None,
+    performer: Optional[str] = None,
+):
     caption = _append_sponsor(caption, limit=CAPTION_LIMIT)
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File non trovato: {file_path}")
@@ -1171,7 +1305,10 @@ def _send_audio(chat_id: int, file_path: str, caption: str, title: str):
     last_exc: Optional[Exception] = None
     for attempt in range(1, 6):
         try:
-            return _tg_send_audio_file(chat_id, file_path, caption, title)
+            return _tg_send_audio_file(
+                chat_id, file_path, caption, title,
+                thumb_path=thumb_path, duration=duration, performer=performer,
+            )
         except Exception as e:
             last_exc = e
             if attempt == 5:
@@ -1349,19 +1486,7 @@ def handle_fwd_choice(call: types.CallbackQuery) -> None:
         
         if action == "ok":
             bot.answer_callback_query(call.id, f"Pubblicato su {BITCOIN_CHANNEL}!")
-            try:
-                sticker_set = bot.get_sticker_set("BitcoinPodcast")
-                if sticker_set.stickers:
-                    bot.send_sticker(BITCOIN_CHANNEL, sticker_set.stickers[0].file_id)
-            except Exception:
-                pass
-                
-            for m_id in msg_ids:
-                try:
-                    bot.copy_message(BITCOIN_CHANNEL, chat_id, m_id)
-                except Exception as e:
-                    print(f"Errore copy message to channel: {e}")
-                    
+            _publish_to_channel(chat_id, msg_ids)
             try:
                 bot.edit_message_text(f"✅ Pubblicato su {BITCOIN_CHANNEL}.", call.message.chat.id, call.message.message_id)
             except Exception:
@@ -1504,10 +1629,11 @@ def handle_sub_callbacks(call: types.CallbackQuery) -> None:
 
 
 class DownloadTask:
-    def __init__(self, message: types.Message, url: str, mode: str = "B"):
+    def __init__(self, message: types.Message, url: str, mode: str = "B", auto_publish: bool = False):
         self.message = message
         self.url = url
         self.mode = mode
+        self.auto_publish = auto_publish
 
 download_queue = queue.Queue()
 
@@ -1671,10 +1797,15 @@ def _process_download(task: DownloadTask) -> None:
             if mode in ["A", "B"]:
                 audio_path = _download_audio(url, yt_id, info if 'info' in locals() else info_preview)
                 
-            thumb_url = (info.get("thumbnail") if 'info' in locals() else info_preview.get("thumbnail"))
+            meta = info if 'info' in locals() else info_preview
+            thumb_url = meta.get("thumbnail")
 
             if not thumb_url:
                 thumb_url = "https://i.ytimg.com/vi/{}/hqdefault.jpg".format(yt_id)
+
+            small_thumb = _prepare_thumbnail(thumb_url, yt_id)
+            duration = int(meta.get("duration") or 0) or None
+            performer = meta.get("channel") or meta.get("uploader") or None
 
             try:
                 thumb_result = _send_thumbnail(message.chat.id, thumb_url, f"📸 {title}", yt_id)
@@ -1687,14 +1818,25 @@ def _process_download(task: DownloadTask) -> None:
 
             if video_path and mode in ["V", "B"]:
                 try:
-                    msg_video = _send_video_or_document(message.chat.id, video_path, "🎬 Video")
+                    msg_video = _send_video_or_document(
+                        message.chat.id, video_path, "🎬 Video",
+                        thumb_path=small_thumb,
+                        duration=duration,
+                        width=meta.get("width") or None,
+                        height=meta.get("height") or None,
+                    )
                 except Exception as e:
                     vsz = os.path.getsize(video_path) if os.path.exists(video_path) else -1
                     print(f"Invio video fallito (size={vsz}): {e}")
 
             if audio_path and mode in ["A", "B"]:
                 try:
-                    msg_audio = _send_audio(message.chat.id, audio_path, "🎵 Audio", title)
+                    msg_audio = _send_audio(
+                        message.chat.id, audio_path, "🎵 Audio", title,
+                        thumb_path=small_thumb,
+                        duration=duration,
+                        performer=performer,
+                    )
                 except Exception as e:
                     asz = os.path.getsize(audio_path) if os.path.exists(audio_path) else -1
                     print(f"Invio audio fallito (size={asz}): {e}")
@@ -1727,10 +1869,14 @@ def _process_download(task: DownloadTask) -> None:
         if isinstance(msg_audio, dict) and msg_audio.get("message_id"): sent_ids.append(msg_audio["message_id"])
         elif hasattr(msg_audio, "message_id"): sent_ids.append(msg_audio.message_id)
 
-        # Niente pubblicazione automatica: sul canale ci va solo quello che approvi.
-        terms = _bitcoin_terms_in(info if "info" in locals() else info_preview)
-        if terms and sent_ids:
-            _propose_channel_publication(message, title, terms, sent_ids)
+        if sent_ids:
+            if task.auto_publish:
+                _publish_to_channel(message.chat.id, sent_ids, sticker_file_id)
+            else:
+                # Tutto il resto sul canale ci va solo se lo approvi.
+                terms = _bitcoin_terms_in(info if "info" in locals() else info_preview)
+                if terms:
+                    _propose_channel_publication(message, title, terms, sent_ids)
 
         if status:
             bot.delete_message(message.chat.id, status.message_id)
@@ -1752,6 +1898,17 @@ def _process_download(task: DownloadTask) -> None:
         if yt_id:
             _cleanup_partial_downloads(f"{yt_id}_video.")
             _cleanup_partial_downloads(f"{yt_id}_audio.")
+            leftovers = [f"{yt_id}_thumb.jpg", f"{yt_id}_thumb_small.jpg"]
+            # writethumbnail lascia la copertina dell'audio se EmbedThumbnail non la consuma.
+            leftovers += [
+                n for n in os.listdir(DOWNLOAD_DIR)
+                if n.startswith(f"{yt_id}_audio.") and n.endswith((".webp", ".jpg", ".png"))
+            ]
+            for name in leftovers:
+                try:
+                    os.remove(os.path.join(DOWNLOAD_DIR, name))
+                except OSError:
+                    pass
         if status:
             try:
                 bot.delete_message(message.chat.id, status.message_id)
@@ -1810,6 +1967,8 @@ def notify_subscribers(channel_url: str, video_url: str, channel_title: Optional
     for user_id in target_users:
         try:
             text = f"🔔 Nuovo video dal canale {display_name}!\nVerrà scaricato automaticamente."
+            if user_id == ADMIN_USER_ID:
+                text += f"\nVideo e audio vanno anche su {BITCOIN_CHANNEL}."
             bot.send_message(user_id, _append_sponsor(text, limit=TEXT_LIMIT))
             
             # Create a fake message object for the background download
@@ -1822,7 +1981,9 @@ def notify_subscribers(channel_url: str, video_url: str, channel_title: Optional
                 content_type="text",
                 options={}
             )
-            download_queue.put(DownloadTask(fake_message, video_url))
+            download_queue.put(
+                DownloadTask(fake_message, video_url, mode="B", auto_publish=(user_id == ADMIN_USER_ID))
+            )
         except Exception as e:
             print(f"Errore nella notifica all'utente {user_id}: {e}")
 

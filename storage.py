@@ -4,6 +4,9 @@ import time
 from typing import Optional, TypedDict
 
 
+# Alzarlo scarta le voci in cache prodotte da versioni precedenti (mp3 e miniature nuove).
+CACHE_FORMAT = 2
+
 SPONSOR_PERIOD_S = 30 * 24 * 3600
 SPONSOR_WARN_S = 7 * 24 * 3600
 
@@ -150,6 +153,11 @@ def init_db(db_path: str) -> None:
 
         try:
             conn.execute("ALTER TABLE channels_state ADD COLUMN channel_title TEXT")
+        except sqlite3.OperationalError:
+            pass # already exists
+
+        try:
+            conn.execute("ALTER TABLE cache ADD COLUMN fmt_v INTEGER NOT NULL DEFAULT 0")
         except sqlite3.OperationalError:
             pass # already exists
 
@@ -402,8 +410,11 @@ def clear_sponsors(db_path: str) -> int:
 def get_cache(db_path: str, yt_id: str) -> Optional[CacheEntry]:
     with _connect(db_path) as conn:
         row = conn.execute(
-            "SELECT yt_id, title, thumb_file_id, video_file_id, audio_file_id FROM cache WHERE yt_id=?",
-            (yt_id,),
+            """
+            SELECT yt_id, title, thumb_file_id, video_file_id, audio_file_id
+            FROM cache WHERE yt_id=? AND fmt_v=?
+            """,
+            (yt_id, CACHE_FORMAT),
         ).fetchone()
     if not row:
         return None
@@ -429,16 +440,17 @@ def upsert_cache(
     with _connect(db_path) as conn:
         conn.execute(
             """
-            INSERT INTO cache (yt_id, title, thumb_file_id, video_file_id, audio_file_id, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO cache (yt_id, title, thumb_file_id, video_file_id, audio_file_id, updated_at, fmt_v)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(yt_id) DO UPDATE SET
                 title=excluded.title,
                 thumb_file_id=excluded.thumb_file_id,
                 video_file_id=excluded.video_file_id,
                 audio_file_id=excluded.audio_file_id,
-                updated_at=excluded.updated_at
+                updated_at=excluded.updated_at,
+                fmt_v=excluded.fmt_v
             """,
-            (yt_id, title, thumb_file_id, video_file_id, audio_file_id, now),
+            (yt_id, title, thumb_file_id, video_file_id, audio_file_id, now, CACHE_FORMAT),
         )
 
 

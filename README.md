@@ -72,9 +72,25 @@ Basta che nel messaggio ci sia un link supportato: funziona anche se è in mezzo
 testo, se il messaggio è inoltrato, se sta nella didascalia di una foto o di un video, o se
 è nascosto dietro un testo formattato. Il bot isola il link e ignora il resto.
 
+## Formato dei file inviati
+
+- **Video**: `sendVideo` con miniatura esplicita (jpeg 320px generato con ffmpeg dalla copertina
+  di YouTube) più durata, larghezza e altezza. Senza questi Telegram deve indovinare un frame di
+  copertina da solo e spesso mostra un riquadro nero.
+- **Audio**: ricodificato in **mp3 192k** da ffmpeg, con tag e copertina incorporati, inviato con
+  mime `audio/mpeg` e il titolo del video come nome file. Il flusso nativo di YouTube è opus in
+  webm: Telegram lo accetta ma i telefoni non lo salvano come brano.
+
+La cache dei `file_id` è versionata (`CACHE_FORMAT` in `storage.py`): alzando quel numero le voci
+prodotte da versioni precedenti vengono ignorate e rigenerate al primo download successivo.
+
 ## Pubblicazione sul canale bitcoin
 
-Quando titolo, descrizione, tag o canale di un video contengono termini esplicitamente bitcoin
-(`bitcoin`, `btc`, `sats`, `satoshi`, `nakamoto`, `halving`, `hodl`, `lightning network`, `taproot`, `₿`…),
-il bot manda all'admin una proposta con i termini trovati e i pulsanti ✅ Pubblica / ❌ Scarta.
-Niente viene pubblicato su `BITCOIN_CHANNEL` senza quell'approvazione.
+Le **iscrizioni dell'admin** sono il canale automatico: a ogni nuovo video di un canale seguito da
+`ADMIN_USER_ID`, il bot scarica video e audio e li pubblica su `BITCOIN_CHANNEL` senza chiedere
+niente — la scelta di cosa seguire è già il filtro.
+
+Per tutto il resto serve l'approvazione: quando titolo, descrizione, tag o canale di un video
+contengono termini esplicitamente bitcoin (`bitcoin`, `btc`, `sats`, `satoshi`, `nakamoto`,
+`halving`, `hodl`, `lightning network`, `taproot`, `₿`…), il bot manda all'admin una proposta con i
+termini trovati e i pulsanti ✅ Pubblica / ❌ Scarta.
