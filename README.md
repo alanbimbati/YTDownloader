@@ -78,8 +78,14 @@ testo, se il messaggio è inoltrato, se sta nella didascalia di una foto o di un
   di YouTube) più durata, larghezza e altezza. Senza questi Telegram deve indovinare un frame di
   copertina da solo e spesso mostra un riquadro nero.
 - **Audio**: ricodificato in **mp3 192k** da ffmpeg, con tag e copertina incorporati, inviato con
-  mime `audio/mpeg` e il titolo del video come nome file. Il flusso nativo di YouTube è opus in
-  webm: Telegram lo accetta ma i telefoni non lo salvano come brano.
+  mime `audio/mpeg`. Il flusso nativo di YouTube è opus in webm: Telegram lo accetta ma i telefoni
+  non lo salvano come brano.
+- **Nome file**: il titolo del video ripulito dai caratteri che non possono stare in un percorso
+  (`_safe_filename`), non `video.mp4`. Vale per video, audio e copertina.
+- **Metadati**: prima dell'invio ffmpeg riscrive i tag del file (senza ricodificare) con titolo,
+  autore del canale di origine, e `BITCOIN_CHANNEL` + la lista degli sponsor attivi in
+  `album`/`publisher`/`comment`. Restano nel file anche fuori da Telegram, quindi chi lo salva o lo
+  rigira vede da dove arriva.
 
 La cache dei `file_id` è versionata (`CACHE_FORMAT` in `storage.py`): alzando quel numero le voci
 prodotte da versioni precedenti vengono ignorate e rigenerate al primo download successivo.

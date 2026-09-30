@@ -5,7 +5,7 @@ from typing import Optional, TypedDict
 
 
 # Alzarlo scarta le voci in cache prodotte da versioni precedenti (mp3 e miniature nuove).
-CACHE_FORMAT = 2
+CACHE_FORMAT = 3
 
 SPONSOR_PERIOD_S = 30 * 24 * 3600
 SPONSOR_WARN_S = 7 * 24 * 3600

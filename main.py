@@ -135,12 +135,13 @@ def _tg_send_video_file(
     file_path: str,
     caption: str,
     *,
+    title: str = "video",
     thumb_path: Optional[str] = None,
     duration: Optional[int] = None,
     width: Optional[int] = None,
     height: Optional[int] = None,
 ) -> dict:
-    filename = "video.mp4"
+    filename = f"{_safe_filename(title)}{os.path.splitext(file_path)[1] or '.mp4'}"
     mime = _guess_mime(file_path, "video/mp4")
     data = {"chat_id": str(chat_id), "caption": caption, "supports_streaming": "true"}
     # Senza questi Telegram deve indovinare il frame di copertina, e spesso ne pesca uno nero.
@@ -167,8 +168,9 @@ def _tg_send_video_file(
                 thumb_f.close()
 
 
-def _tg_send_document_file(chat_id: int, file_path: str, caption: str) -> dict:
-    filename = os.path.basename(file_path) or "file.bin"
+def _tg_send_document_file(chat_id: int, file_path: str, caption: str, title: str = "") -> dict:
+    ext = os.path.splitext(file_path)[1]
+    filename = f"{_safe_filename(title)}{ext}" if title else (os.path.basename(file_path) or "file.bin")
     mime = _guess_mime(file_path, "application/octet-stream")
     with open(file_path, "rb") as f:
         if not f.read(1):
@@ -219,8 +221,9 @@ def _tg_send_audio_file(
 
 
 def _safe_filename(title: str, max_len: int = 60) -> str:
-    cleaned = re.sub(r'[\\/:*?"<>|\r\n]+', " ", title or "audio").strip()
-    return (cleaned[:max_len].strip() or "audio")
+    cleaned = re.sub(r'[\\/:*?"<>|\r\n]+', " ", title or "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned[:max_len].strip() or "media"
 
 
 def _tg_send_photo(chat_id: int, photo: str, caption: str) -> dict:
@@ -232,8 +235,8 @@ def _tg_send_photo(chat_id: int, photo: str, caption: str) -> dict:
     )
 
 
-def _tg_send_photo_file(chat_id: int, file_path: str, caption: str) -> dict:
-    filename = os.path.basename(file_path) or "photo.jpg"
+def _tg_send_photo_file(chat_id: int, file_path: str, caption: str, title: str = "") -> dict:
+    filename = f"{_safe_filename(title)}.jpg" if title else (os.path.basename(file_path) or "photo.jpg")
     mime = _guess_mime(file_path, "image/jpeg")
     with open(file_path, "rb") as f:
         if not f.read(1):
@@ -1211,6 +1214,46 @@ def _send_with_retry(fn, *args, **kwargs):
         raise last_exc
 
 
+def _media_tags(title: str, performer: str, source_url: str) -> dict:
+    note = BITCOIN_CHANNEL
+    sponsors = storage.list_sponsors(DB_PATH)
+    if sponsors:
+        note += " — Consigliati: " + ", ".join(sponsors)
+    if source_url:
+        note += f" — {source_url}"
+
+    tags = {"title": title, "album": BITCOIN_CHANNEL, "comment": note, "publisher": BITCOIN_CHANNEL}
+    if performer:
+        tags["artist"] = performer
+        tags["album_artist"] = BITCOIN_CHANNEL
+    return tags
+
+
+def _tag_media(path: str, *, title: str, performer: str = "", source_url: str = "") -> str:
+    """Canale e sponsor finiscono nei tag: restano attaccati al file anche fuori da Telegram."""
+    ext = os.path.splitext(path)[1].lower()
+    tagged = f"{os.path.splitext(path)[0]}_tagged{ext}"
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", path, "-map", "0", "-c", "copy"]
+    if ext in (".mp4", ".m4a"):
+        # Sposta l'indice in testa: serve anche a far partire l'anteprima senza scaricare tutto.
+        cmd += ["-movflags", "+faststart"]
+    for key, value in _media_tags(title, performer, source_url).items():
+        cmd += ["-metadata", f"{key}={value}"]
+    cmd.append(tagged)
+
+    try:
+        subprocess.run(cmd, check=True, timeout=60 * 20)
+        if os.path.getsize(tagged) > 0:
+            os.replace(tagged, path)
+    except Exception as e:
+        print(f"Tag non scritti su {os.path.basename(path)}: {e}")
+        try:
+            os.remove(tagged)
+        except OSError:
+            pass
+    return path
+
+
 def _prepare_thumbnail(thumb_url: str, yt_id: str) -> Optional[str]:
     """Miniatura per sendVideo/sendAudio: Telegram la vuole jpeg, max 320px e sotto i 200KB."""
     if not thumb_url:
@@ -1243,6 +1286,7 @@ def _send_video_or_document(
     file_path: str,
     caption: str,
     *,
+    title: str = "video",
     thumb_path: Optional[str] = None,
     duration: Optional[int] = None,
     width: Optional[int] = None,
@@ -1261,7 +1305,8 @@ def _send_video_or_document(
         try:
             return _tg_send_video_file(
                 chat_id, file_path, caption,
-                thumb_path=thumb_path, duration=duration, width=width, height=height,
+                title=title, thumb_path=thumb_path,
+                duration=duration, width=width, height=height,
             )
         except Exception as e:
             last_exc = e
@@ -1274,7 +1319,7 @@ def _send_video_or_document(
 
     for attempt in range(1, 6):
         try:
-            return _tg_send_document_file(chat_id, file_path, caption)
+            return _tg_send_document_file(chat_id, file_path, caption, title)
         except Exception as e:
             last_exc = e
             if attempt == 5:
@@ -1318,7 +1363,7 @@ def _send_audio(
         raise last_exc
 
 
-def _send_thumbnail(chat_id: int, thumb_url: str, caption: str, yt_id: str):
+def _send_thumbnail(chat_id: int, thumb_url: str, caption: str, yt_id: str, title: str = ""):
     caption = _append_sponsor(caption, limit=CAPTION_LIMIT)
     # Prova 1: lascia che Telegram scarichi l'URL (più veloce).
     try:
@@ -1340,7 +1385,7 @@ def _send_thumbnail(chat_id: int, thumb_url: str, caption: str, yt_id: str):
     last_exc: Optional[Exception] = None
     for attempt in range(1, 6):
         try:
-            msg = _tg_send_photo_file(chat_id, thumb_path, caption)
+            msg = _tg_send_photo_file(chat_id, thumb_path, caption, title)
             return msg, thumb_path
         except Exception as e:
             last_exc = e
@@ -1807,8 +1852,12 @@ def _process_download(task: DownloadTask) -> None:
             duration = int(meta.get("duration") or 0) or None
             performer = meta.get("channel") or meta.get("uploader") or None
 
+            for path in (video_path, audio_path):
+                if path:
+                    _tag_media(path, title=title, performer=performer or "", source_url=url)
+
             try:
-                thumb_result = _send_thumbnail(message.chat.id, thumb_url, f"📸 {title}", yt_id)
+                thumb_result = _send_thumbnail(message.chat.id, thumb_url, f"📸 {title}", yt_id, title)
                 if isinstance(thumb_result, tuple):
                     msg_photo, thumb_path = thumb_result
                 else:
@@ -1820,6 +1869,7 @@ def _process_download(task: DownloadTask) -> None:
                 try:
                     msg_video = _send_video_or_document(
                         message.chat.id, video_path, "🎬 Video",
+                        title=title,
                         thumb_path=small_thumb,
                         duration=duration,
                         width=meta.get("width") or None,
