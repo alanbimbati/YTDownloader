@@ -337,6 +337,7 @@ def _propose_channel_publication(message: types.Message, title: str, terms: list
 SUPPORTED_DOMAINS = (
     "youtube.com", "youtu.be", "tiktok.com", "instagram.com",
     "twitter.com", "x.com", "reddit.com",
+    "pinterest.com", "pinterest.it", "pin.it", "linkedin.com", "lnkd.in",
 )
 
 _URL_RE = re.compile(
@@ -1569,7 +1570,7 @@ def handle_start(message: types.Message) -> None:
     bot.send_message(
         message.chat.id,
         _append_sponsor(
-            "Incolla un link qui (supporto Youtube, TikTok, IG Reels, Twitter/X, Reddit!) e scegli cosa scaricare.\n\n"
+            "Incolla un link qui (supporto Youtube, TikTok, Instagram, Pinterest, LinkedIn, Twitter/X, Reddit!) e scegli cosa scaricare.\n\n"
             "Usa il menu in basso per gestire le iscrizioni o accedere agli strumenti extra.",
             limit=TEXT_LIMIT,
             for_chat=message.chat.id,
