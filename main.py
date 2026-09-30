@@ -14,6 +14,8 @@ from telebot import apihelper, types
 
 import storage
 from config import (
+    AD_FREE_PAYEE,
+    AD_FREE_PRICE_SATS,
     ADMIN_CONTACT,
     ADMIN_USER_ID,
     API_BASE_URL,
@@ -76,9 +78,19 @@ def _sponsor_block(max_chars: int) -> str:
     return "" if block == SPONSOR_HEADER else block
 
 
-def _append_sponsor(text: str, *, limit: int) -> str:
+def _is_ad_free(chat_id: Optional[int]) -> bool:
+    # L'admin no: i suoi messaggi vengono copiati sul canale, che deve restare con gli sponsor.
+    if chat_id is None or chat_id == ADMIN_USER_ID:
+        return False
+    try:
+        return storage.is_ad_free(DB_PATH, int(chat_id))
+    except (TypeError, ValueError):
+        return False
+
+
+def _append_sponsor(text: str, *, limit: int, for_chat: Optional[int] = None) -> str:
     base = (text or "").strip()
-    if SPONSOR_HEADER.lower() in base.lower():
+    if SPONSOR_HEADER.lower() in base.lower() or _is_ad_free(for_chat):
         return base[:limit]
 
     suffix = _sponsor_block(min(SPONSOR_BLOCK_MAX, limit))
@@ -407,6 +419,7 @@ def _ensure_authorized(message: types.Message) -> bool:
             _append_sponsor(
                 f"Richiesta whitelist: {_user_label(message.from_user)}\nVuoi che questo utente utilizzi il bot?",
                 limit=TEXT_LIMIT,
+                for_chat=ADMIN_USER_ID,
             ),
             reply_markup=kb,
         )
@@ -416,6 +429,7 @@ def _ensure_authorized(message: types.Message) -> bool:
         _append_sponsor(
             "⛔ Non sei autorizzato. Ho inviato una richiesta di approvazione all'admin.",
             limit=TEXT_LIMIT,
+            for_chat=message.chat.id,
         ),
     )
     return False
@@ -439,11 +453,11 @@ def handle_whitelist_callback(call: types.CallbackQuery) -> None:
             storage.add_whitelist(DB_PATH, target_id, "")
             bot.send_message(
                 target_id,
-                _append_sponsor("✅ Sei stato approvato. Ora puoi usare il bot.", limit=TEXT_LIMIT),
+                _append_sponsor("✅ Sei stato approvato. Ora puoi usare il bot.", limit=TEXT_LIMIT, for_chat=target_id),
             )
             bot.answer_callback_query(call.id, "Approvato.")
             bot.edit_message_text(
-                _append_sponsor("✅ Utente approvato.", limit=TEXT_LIMIT),
+                _append_sponsor("✅ Utente approvato.", limit=TEXT_LIMIT, for_chat=call.message.chat.id),
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
             )
@@ -452,11 +466,11 @@ def handle_whitelist_callback(call: types.CallbackQuery) -> None:
         if action == "deny":
             bot.send_message(
                 target_id,
-                _append_sponsor("❌ Richiesta rifiutata.", limit=TEXT_LIMIT),
+                _append_sponsor("❌ Richiesta rifiutata.", limit=TEXT_LIMIT, for_chat=target_id),
             )
             bot.answer_callback_query(call.id, "Rifiutato.")
             bot.edit_message_text(
-                _append_sponsor("❌ Utente rifiutato.", limit=TEXT_LIMIT),
+                _append_sponsor("❌ Utente rifiutato.", limit=TEXT_LIMIT, for_chat=call.message.chat.id),
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
             )
@@ -473,7 +487,7 @@ SPONSOR_PERIOD_DAYS = storage.SPONSOR_PERIOD_S // 86400
 def _is_admin(message: types.Message) -> bool:
     if message.from_user and message.from_user.id == ADMIN_USER_ID:
         return True
-    bot.reply_to(message, _append_sponsor("Non autorizzato.", limit=TEXT_LIMIT))
+    bot.reply_to(message, _append_sponsor("Non autorizzato.", limit=TEXT_LIMIT, for_chat=message.chat.id))
     return False
 
 
@@ -749,7 +763,7 @@ def handle_sponsor_add(message: types.Message) -> None:
     if len(raw) < 2 or not raw[1].strip():
         bot.reply_to(
             message,
-            _append_sponsor("Uso: /sponsor_add Nome Sponsor [@username_proprietario]", limit=TEXT_LIMIT),
+            _append_sponsor("Uso: /sponsor_add Nome Sponsor [@username_proprietario]", limit=TEXT_LIMIT, for_chat=message.chat.id),
         )
         return
 
@@ -757,13 +771,13 @@ def handle_sponsor_add(message: types.Message) -> None:
     owner = args.pop().lstrip("@") if len(args) > 1 and args[-1].startswith("@") else ""
     name = " ".join(args)
     if not name or len(name) > 64:
-        bot.reply_to(message, _append_sponsor("Nome mancante o troppo lungo (max 64).", limit=TEXT_LIMIT))
+        bot.reply_to(message, _append_sponsor("Nome mancante o troppo lungo (max 64).", limit=TEXT_LIMIT, for_chat=message.chat.id))
         return
 
     expires_at = storage.add_sponsor(DB_PATH, name, owner)
     bot.reply_to(
         message,
-        _append_sponsor(f"Aggiunto sponsor: {name} (fino al {_fmt_day(expires_at)})", limit=TEXT_LIMIT),
+        _append_sponsor(f"Aggiunto sponsor: {name} (fino al {_fmt_day(expires_at)})", limit=TEXT_LIMIT, for_chat=message.chat.id),
     )
 
 
@@ -776,16 +790,16 @@ def handle_sponsor_remove(message: types.Message) -> None:
     if len(raw) < 2 or not raw[1].strip():
         bot.reply_to(
             message,
-            _append_sponsor("Uso: /sponsor_remove Nome Sponsor", limit=TEXT_LIMIT),
+            _append_sponsor("Uso: /sponsor_remove Nome Sponsor", limit=TEXT_LIMIT, for_chat=message.chat.id),
         )
         return
 
     name = raw[1].strip()
     removed = storage.remove_sponsor(DB_PATH, name)
     if removed:
-        bot.reply_to(message, _append_sponsor(f"Rimosso sponsor: {name}", limit=TEXT_LIMIT))
+        bot.reply_to(message, _append_sponsor(f"Rimosso sponsor: {name}", limit=TEXT_LIMIT, for_chat=message.chat.id))
     else:
-        bot.reply_to(message, _append_sponsor(f"Sponsor non trovato: {name}", limit=TEXT_LIMIT))
+        bot.reply_to(message, _append_sponsor(f"Sponsor non trovato: {name}", limit=TEXT_LIMIT, for_chat=message.chat.id))
 
 
 @bot.message_handler(commands=["sponsor_clear"])
@@ -794,7 +808,7 @@ def handle_sponsor_clear(message: types.Message) -> None:
         return
 
     removed = storage.clear_sponsors(DB_PATH)
-    bot.reply_to(message, _append_sponsor(f"Lista sponsor svuotata ({removed}).", limit=TEXT_LIMIT))
+    bot.reply_to(message, _append_sponsor(f"Lista sponsor svuotata ({removed}).", limit=TEXT_LIMIT, for_chat=message.chat.id))
 
 
 def _notify_sponsor_owner(sponsor: dict, text: str) -> bool:
@@ -1292,7 +1306,7 @@ def _send_video_or_document(
     width: Optional[int] = None,
     height: Optional[int] = None,
 ):
-    caption = _append_sponsor(caption, limit=CAPTION_LIMIT)
+    caption = _append_sponsor(caption, limit=CAPTION_LIMIT, for_chat=chat_id)
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File non trovato: {file_path}")
     size = os.path.getsize(file_path)
@@ -1340,7 +1354,7 @@ def _send_audio(
     duration: Optional[int] = None,
     performer: Optional[str] = None,
 ):
-    caption = _append_sponsor(caption, limit=CAPTION_LIMIT)
+    caption = _append_sponsor(caption, limit=CAPTION_LIMIT, for_chat=chat_id)
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File non trovato: {file_path}")
     size = os.path.getsize(file_path)
@@ -1364,7 +1378,7 @@ def _send_audio(
 
 
 def _send_thumbnail(chat_id: int, thumb_url: str, caption: str, yt_id: str, title: str = ""):
-    caption = _append_sponsor(caption, limit=CAPTION_LIMIT)
+    caption = _append_sponsor(caption, limit=CAPTION_LIMIT, for_chat=chat_id)
     # Prova 1: lascia che Telegram scarichi l'URL (più veloce).
     try:
         return _tg_send_photo(chat_id, thumb_url, caption)
@@ -1402,7 +1416,151 @@ def main_menu_keyboard(user_id: Optional[int] = None):
     kb.add(types.KeyboardButton("📊 Report Statistiche"), types.KeyboardButton("📣 Broadcast"))
     if user_id == ADMIN_USER_ID:
         kb.add(types.KeyboardButton("💼 Sponsor"))
+    elif not _is_ad_free(user_id):
+        kb.add(types.KeyboardButton("🚫 Togli la pubblicità"))
     return kb
+
+
+def _sats(n: int) -> str:
+    return f"{n:,}".replace(",", ".")
+
+
+@bot.message_handler(commands=["adfree"])
+def handle_ad_free_offer(message: types.Message) -> None:
+    if not _ensure_authorized(message):
+        return
+    if _is_ad_free(message.chat.id):
+        bot.reply_to(message, "Hai già la versione senza pubblicità. Grazie!")
+        return
+
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("✅ Ho pagato", callback_data="af:paid"))
+    bot.send_message(
+        message.chat.id,
+        f"🚫 Niente più «{SPONSOR_HEADER}» nei messaggi del bot.\n\n"
+        f"Costo: {_sats(AD_FREE_PRICE_SATS)} sats una tantum, per sempre.\n"
+        f"Paga {AD_FREE_PAYEE} e poi tocca il pulsante qui sotto: "
+        "ricevo la tua richiesta e sblocco appena confermo il pagamento.",
+        reply_markup=kb,
+        reply_to_message_id=_get_msg_id(message),
+    )
+
+
+@bot.message_handler(func=lambda m: m.text == "🚫 Togli la pubblicità")
+def handle_btn_ad_free(message: types.Message) -> None:
+    handle_ad_free_offer(message)
+
+
+@bot.callback_query_handler(func=lambda c: (c.data or "").startswith("af:"))
+def handle_ad_free_callbacks(call: types.CallbackQuery) -> None:
+    try:
+        parts = (call.data or "").split(":")
+        action = parts[1]
+
+        if action == "paid":
+            user = call.from_user
+            bot.answer_callback_query(call.id, "Richiesta inviata, ti avviso appena confermo.")
+            try:
+                bot.edit_message_text(
+                    "⏳ Richiesta inviata. Ti avviso appena il pagamento è confermato.",
+                    call.message.chat.id,
+                    call.message.message_id,
+                )
+            except Exception:
+                pass
+
+            kb = types.InlineKeyboardMarkup(row_width=2)
+            kb.add(
+                types.InlineKeyboardButton("✅ Confermo", callback_data=f"af:ok:{user.id}"),
+                types.InlineKeyboardButton("❌ Non risulta", callback_data=f"af:no:{user.id}"),
+            )
+            bot.send_message(
+                ADMIN_USER_ID,
+                f"💸 {_user_label(user)} dice di aver pagato "
+                f"{_sats(AD_FREE_PRICE_SATS)} sats per togliere la pubblicità.\nHai ricevuto?",
+                reply_markup=kb,
+            )
+            return
+
+        if call.from_user.id != ADMIN_USER_ID:
+            bot.answer_callback_query(call.id, "Non autorizzato.")
+            return
+
+        target_id = int(parts[2])
+        if action == "ok":
+            username = ""
+            try:
+                username = bot.get_chat(target_id).username or ""
+            except Exception:
+                pass
+            storage.grant_ad_free(DB_PATH, target_id, username)
+            bot.answer_callback_query(call.id, "Sbloccato.")
+            _edit_or_ignore(call, f"✅ Pubblicità tolta a {target_id}.")
+            try:
+                bot.send_message(
+                    target_id,
+                    "✅ Pagamento confermato: niente più pubblicità nei messaggi del bot. Grazie!",
+                    reply_markup=main_menu_keyboard(target_id),
+                )
+            except Exception:
+                pass
+            return
+
+        if action == "no":
+            bot.answer_callback_query(call.id, "Rifiutato.")
+            _edit_or_ignore(call, f"❌ Pagamento non confermato per {target_id}.")
+            try:
+                bot.send_message(target_id, f"❌ Non risulta il pagamento. Scrivi a {AD_FREE_PAYEE}.")
+            except Exception:
+                pass
+            return
+
+        bot.answer_callback_query(call.id, "Azione non valida.")
+    except Exception as e:
+        try:
+            bot.answer_callback_query(call.id, f"Errore: {e}")
+        except Exception:
+            pass
+
+
+def _edit_or_ignore(call: types.CallbackQuery, text: str) -> None:
+    try:
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+
+
+@bot.message_handler(commands=["adfree_add", "adfree_remove", "adfree_list"])
+def handle_ad_free_admin(message: types.Message) -> None:
+    if not _is_admin(message):
+        return
+
+    parts = (message.text or "").split()
+    command = parts[0].split("@")[0].lstrip("/")
+
+    if command == "adfree_list":
+        rows = storage.list_ad_free(DB_PATH)
+        if not rows:
+            bot.reply_to(message, "Nessuno ha ancora tolto la pubblicità.")
+            return
+        lines = "\n".join(
+            f"- {uid}" + (f" (@{uname})" if uname else "") + f" dal {_fmt_day(ts)}"
+            for uid, uname, ts in rows
+        )
+        bot.reply_to(message, f"Senza pubblicità:\n{lines}")
+        return
+
+    if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
+        bot.reply_to(message, f"Uso: /{command} USER_ID (lo trovi in /report o nella richiesta)")
+        return
+
+    target_id = int(parts[1])
+    if command == "adfree_add":
+        storage.grant_ad_free(DB_PATH, target_id)
+        bot.reply_to(message, f"✅ Pubblicità tolta a {target_id}.")
+    else:
+        removed = storage.revoke_ad_free(DB_PATH, target_id)
+        bot.reply_to(message, f"Pubblicità riattivata per {target_id}." if removed else "Non era sbloccato.")
 
 @bot.message_handler(commands=["start", "help"])
 def handle_start(message: types.Message) -> None:
@@ -1414,6 +1572,7 @@ def handle_start(message: types.Message) -> None:
             "Incolla un link qui (supporto Youtube, TikTok, IG Reels, Twitter/X, Reddit!) e scegli cosa scaricare.\n\n"
             "Usa il menu in basso per gestire le iscrizioni o accedere agli strumenti extra.",
             limit=TEXT_LIMIT,
+            for_chat=message.chat.id,
         ),
         reply_markup=main_menu_keyboard(message.from_user.id),
         reply_to_message_id=_get_msg_id(message)
@@ -1422,7 +1581,7 @@ def handle_start(message: types.Message) -> None:
 @bot.message_handler(func=lambda m: m.text == "➕ Nuova Iscrizione")
 def handle_btn_new_sub(message: types.Message) -> None:
     if not _ensure_authorized(message): return
-    msg = bot.reply_to(message, _append_sponsor("Incolla qui il link del canale YouTube a cui vuoi iscriverti\n(Oppure invia /annulla per annullare):", limit=TEXT_LIMIT), reply_markup=types.ForceReply())
+    msg = bot.reply_to(message, _append_sponsor("Incolla qui il link del canale YouTube a cui vuoi iscriverti\n(Oppure invia /annulla per annullare):", limit=TEXT_LIMIT, for_chat=message.chat.id), reply_markup=types.ForceReply())
     bot.register_next_step_handler(msg, process_new_sub)
 
 def process_new_sub(message: types.Message) -> None:
@@ -1447,15 +1606,15 @@ def handle_btn_report(message: types.Message) -> None:
 @bot.message_handler(func=lambda m: m.text == "📣 Broadcast")
 def handle_btn_broadcast_init(message: types.Message) -> None:
     if message.from_user.id != ADMIN_USER_ID:
-        bot.reply_to(message, _append_sponsor("Non sei autorizzato.", limit=TEXT_LIMIT))
+        bot.reply_to(message, _append_sponsor("Non sei autorizzato.", limit=TEXT_LIMIT, for_chat=message.chat.id))
         return
-    bot.reply_to(message, _append_sponsor("Invia il comando `/broadcast Il_tuo_messaggio_qui` per inoltrarlo a tutti.", limit=TEXT_LIMIT))
+    bot.reply_to(message, _append_sponsor("Invia il comando `/broadcast Il_tuo_messaggio_qui` per inoltrarlo a tutti.", limit=TEXT_LIMIT, for_chat=message.chat.id))
 
 
 @bot.message_handler(commands=["report"])
 def handle_report(message: types.Message) -> None:
     if message.from_user.id != ADMIN_USER_ID:
-        bot.reply_to(message, _append_sponsor("Non autorizzato.", limit=TEXT_LIMIT))
+        bot.reply_to(message, _append_sponsor("Non autorizzato.", limit=TEXT_LIMIT, for_chat=message.chat.id))
         return
 
     stats = storage.get_report_stats(DB_PATH)
@@ -1480,17 +1639,17 @@ def handle_report(message: types.Message) -> None:
         
         text += f"- `[{dt}]` {user_label} -> {link_md}\n"
         
-    bot.send_message(message.chat.id, _append_sponsor(text, limit=TEXT_LIMIT), parse_mode="Markdown", reply_to_message_id=_get_msg_id(message))
+    bot.send_message(message.chat.id, _append_sponsor(text, limit=TEXT_LIMIT, for_chat=message.chat.id), parse_mode="Markdown", reply_to_message_id=_get_msg_id(message))
 
 @bot.message_handler(commands=["broadcast"])
 def handle_broadcast(message: types.Message) -> None:
     if message.from_user.id != ADMIN_USER_ID:
-        bot.reply_to(message, _append_sponsor("Non autorizzato.", limit=TEXT_LIMIT))
+        bot.reply_to(message, _append_sponsor("Non autorizzato.", limit=TEXT_LIMIT, for_chat=message.chat.id))
         return
         
     raw = (message.text or "").split(maxsplit=1)
     if len(raw) < 2 or not raw[1].strip():
-        bot.reply_to(message, _append_sponsor("Uso: /broadcast Testo del messaggio", limit=TEXT_LIMIT))
+        bot.reply_to(message, _append_sponsor("Uso: /broadcast Testo del messaggio", limit=TEXT_LIMIT, for_chat=message.chat.id))
         return
         
     msg_text = raw[1].strip()
@@ -1503,7 +1662,7 @@ def handle_broadcast(message: types.Message) -> None:
         except Exception:
             pass
             
-    bot.reply_to(message, _append_sponsor(f"✅ Messaggio inviato con successo a {success}/{len(users)} utenti.", limit=TEXT_LIMIT))
+    bot.reply_to(message, _append_sponsor(f"✅ Messaggio inviato con successo a {success}/{len(users)} utenti.", limit=TEXT_LIMIT, for_chat=message.chat.id))
 
 @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("fwd:"))
 def handle_fwd_choice(call: types.CallbackQuery) -> None:
@@ -1554,12 +1713,12 @@ def handle_sub(message: types.Message) -> None:
         return
     raw = (message.text or "").split(maxsplit=1)
     if len(raw) < 2 or not raw[1].strip():
-        bot.send_message(message.chat.id, _append_sponsor("Uso: /sub URL_CANALE_YOUTUBE", limit=TEXT_LIMIT), reply_to_message_id=_get_msg_id(message))
+        bot.send_message(message.chat.id, _append_sponsor("Uso: /sub URL_CANALE_YOUTUBE", limit=TEXT_LIMIT, for_chat=message.chat.id), reply_to_message_id=_get_msg_id(message))
         return
         
     url = _extract_supported_url(raw[1]) or raw[1].strip()
     if not _is_supported_url(url):
-        bot.send_message(message.chat.id, _append_sponsor("Inserisci un URL valido.", limit=TEXT_LIMIT), reply_to_message_id=_get_msg_id(message))
+        bot.send_message(message.chat.id, _append_sponsor("Inserisci un URL valido.", limit=TEXT_LIMIT, for_chat=message.chat.id), reply_to_message_id=_get_msg_id(message))
         return
         
     # Get channel title
@@ -1573,9 +1732,9 @@ def handle_sub(message: types.Message) -> None:
         print(f"Errore recupero titolo canale: {e}")
         
     if storage.add_subscription(DB_PATH, message.from_user.id, url):
-        bot.send_message(message.chat.id, _append_sponsor(f"Iscrizione completata per: {title}\nRiceverai notifiche per i nuovi video.", limit=TEXT_LIMIT), reply_to_message_id=_get_msg_id(message))
+        bot.send_message(message.chat.id, _append_sponsor(f"Iscrizione completata per: {title}\nRiceverai notifiche per i nuovi video.", limit=TEXT_LIMIT, for_chat=message.chat.id), reply_to_message_id=_get_msg_id(message))
     else:
-        bot.send_message(message.chat.id, _append_sponsor("Sei già iscritto a questo canale.", limit=TEXT_LIMIT), reply_to_message_id=_get_msg_id(message))
+        bot.send_message(message.chat.id, _append_sponsor("Sei già iscritto a questo canale.", limit=TEXT_LIMIT, for_chat=message.chat.id), reply_to_message_id=_get_msg_id(message))
 
 @bot.message_handler(commands=["unsub"])
 def handle_unsub(message: types.Message) -> None:
@@ -1583,15 +1742,15 @@ def handle_unsub(message: types.Message) -> None:
         return
     raw = (message.text or "").split(maxsplit=1)
     if len(raw) < 2 or not raw[1].strip():
-        bot.reply_to(message, _append_sponsor("Uso: /unsub URL_CANALE_YOUTUBE", limit=TEXT_LIMIT))
+        bot.reply_to(message, _append_sponsor("Uso: /unsub URL_CANALE_YOUTUBE", limit=TEXT_LIMIT, for_chat=message.chat.id))
         return
         
     url = raw[1].strip()
     title = storage.get_channel_title(DB_PATH, url) or url
     if storage.remove_subscription(DB_PATH, message.from_user.id, url):
-        bot.send_message(message.chat.id, _append_sponsor(f"Iscrizione rimossa per: {title}", limit=TEXT_LIMIT), reply_to_message_id=_get_msg_id(message))
+        bot.send_message(message.chat.id, _append_sponsor(f"Iscrizione rimossa per: {title}", limit=TEXT_LIMIT, for_chat=message.chat.id), reply_to_message_id=_get_msg_id(message))
     else:
-        bot.send_message(message.chat.id, _append_sponsor("Non risulti iscritto a questo canale.", limit=TEXT_LIMIT), reply_to_message_id=_get_msg_id(message))
+        bot.send_message(message.chat.id, _append_sponsor("Non risulti iscritto a questo canale.", limit=TEXT_LIMIT, for_chat=message.chat.id), reply_to_message_id=_get_msg_id(message))
 
 @bot.message_handler(commands=["mysubs"])
 def handle_mysubs(message: types.Message) -> None:
@@ -1711,7 +1870,7 @@ def handle_download(message: types.Message) -> None:
     if message.from_user.id != ADMIN_USER_ID:
         count = storage.get_downloads_last_hour(DB_PATH, message.from_user.id)
         if count >= 3:
-            bot.reply_to(message, _append_sponsor("Hai raggiunto il limite di 3 download all'ora. Riprova più tardi.", limit=TEXT_LIMIT))
+            bot.reply_to(message, _append_sponsor("Hai raggiunto il limite di 3 download all'ora. Riprova più tardi.", limit=TEXT_LIMIT, for_chat=message.chat.id))
             return
 
     url = _message_url(message)
@@ -1726,7 +1885,7 @@ def handle_download(message: types.Message) -> None:
         types.InlineKeyboardButton("🎬 Solo Video", callback_data=f"dl:V:{url_id}"),
         types.InlineKeyboardButton("📽️ Entrambi", callback_data=f"dl:B:{url_id}")
     )
-    bot.send_message(message.chat.id, _append_sponsor("Scegli un formato:", limit=TEXT_LIMIT), reply_markup=kb, reply_to_message_id=_get_msg_id(message))
+    bot.send_message(message.chat.id, _append_sponsor("Scegli un formato:", limit=TEXT_LIMIT, for_chat=message.chat.id), reply_markup=kb, reply_to_message_id=_get_msg_id(message))
 
 @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("dl:"))
 def handle_dl_choice(call: types.CallbackQuery) -> None:
@@ -1750,7 +1909,7 @@ def handle_dl_choice(call: types.CallbackQuery) -> None:
         original_message = call.message.reply_to_message or call.message
         bot.send_message(
             call.message.chat.id, 
-            _append_sponsor(f"⏳ Richiesta accodata. Posizione stimata: {qsize + 1}...", limit=TEXT_LIMIT),
+            _append_sponsor(f"⏳ Richiesta accodata. Posizione stimata: {qsize + 1}...", limit=TEXT_LIMIT, for_chat=call.message.chat.id),
             reply_to_message_id=_get_msg_id(original_message)
         )
         download_queue.put(DownloadTask(original_message, url, mode))
@@ -1771,7 +1930,7 @@ def _process_download(task: DownloadTask) -> None:
         msg_id = _get_msg_id(message)
         status = bot.send_message(
             message.chat.id, 
-            _append_sponsor("⏳ Sto preparando download e invio…", limit=TEXT_LIMIT),
+            _append_sponsor("⏳ Sto preparando download e invio…", limit=TEXT_LIMIT, for_chat=message.chat.id),
             reply_to_message_id=msg_id if msg_id and msg_id > 0 else None
         )
 
@@ -1802,7 +1961,7 @@ def _process_download(task: DownloadTask) -> None:
             msg_photo = bot.send_photo(
                 message.chat.id,
                 cached["thumb_file_id"],
-                caption=_append_sponsor(f"📸 {title}", limit=CAPTION_LIMIT),
+                caption=_append_sponsor(f"📸 {title}", limit=CAPTION_LIMIT, for_chat=message.chat.id),
             )
             if mode in ["V", "B"]:
                 try:
@@ -1810,21 +1969,21 @@ def _process_download(task: DownloadTask) -> None:
                         bot.send_video,
                         message.chat.id,
                         cached["video_file_id"],
-                        caption=_append_sponsor("🎬 Video (cache)", limit=CAPTION_LIMIT),
+                        caption=_append_sponsor("🎬 Video (cache)", limit=CAPTION_LIMIT, for_chat=message.chat.id),
                     )
                 except Exception:
                     msg_video = _send_with_retry(
                         bot.send_document,
                         message.chat.id,
                         cached["video_file_id"],
-                        caption=_append_sponsor("🎬 Video (cache)", limit=CAPTION_LIMIT),
+                        caption=_append_sponsor("🎬 Video (cache)", limit=CAPTION_LIMIT, for_chat=message.chat.id),
                     )
             if mode in ["A", "B"]:
                 msg_audio = _send_with_retry(
                     bot.send_audio,
                     message.chat.id,
                     cached["audio_file_id"],
-                    caption=_append_sponsor("🎵 Audio (cache)", limit=CAPTION_LIMIT),
+                    caption=_append_sponsor("🎵 Audio (cache)", limit=CAPTION_LIMIT, for_chat=message.chat.id),
                 )
             
             storage.log_download(DB_PATH, message.from_user.id, yt_id, yt_title=title)
@@ -1935,7 +2094,7 @@ def _process_download(task: DownloadTask) -> None:
         msg_id = _get_msg_id(message)
         bot.send_message(
             message.chat.id,
-            _append_sponsor(f"Errore: {str(e)}", limit=TEXT_LIMIT),
+            _append_sponsor(f"Errore: {str(e)}", limit=TEXT_LIMIT, for_chat=message.chat.id),
             reply_to_message_id=msg_id if msg_id and msg_id > 0 else None
         )
     finally:
@@ -2019,7 +2178,7 @@ def notify_subscribers(channel_url: str, video_url: str, channel_title: Optional
             text = f"🔔 Nuovo video dal canale {display_name}!\nVerrà scaricato automaticamente."
             if user_id == ADMIN_USER_ID:
                 text += f"\nVideo e audio vanno anche su {BITCOIN_CHANNEL}."
-            bot.send_message(user_id, _append_sponsor(text, limit=TEXT_LIMIT))
+            bot.send_message(user_id, _append_sponsor(text, limit=TEXT_LIMIT, for_chat=user_id))
             
             # Create a fake message object for the background download
             # We use message_id=-1 or 0 to indicate a background task

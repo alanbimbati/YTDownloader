@@ -66,6 +66,19 @@ cui in fase di inserimento viene chiesto il suo username. Alla scadenza sparisce
 parte un secondo avviso. Il rinnovo aggiunge 30 giorni alla scadenza se è ancora valida, altrimenti
 riparte da oggi.
 
+## Togliere la pubblicità
+
+Chi non vuole il blocco «Consigliati» paga **una tantum** `AD_FREE_PRICE_SATS` sats (20.000 di
+default) a `AD_FREE_PAYEE` e resta senza pubblicità per sempre.
+
+Il bot non incassa: l'utente paga fuori, tocca «✅ Ho pagato», l'admin riceve la richiesta con il
+profilo e conferma con ✅/❌. Solo allora scatta lo sblocco. Gestione anche da comandi:
+`/adfree_list`, `/adfree_add USER_ID`, `/adfree_remove USER_ID`.
+
+Due scelte volute: **l'admin non è sbloccabile**, perché i suoi messaggi vengono copiati sul canale
+che deve mostrare gli sponsor; e i **tag dentro i file** restano quelli (canale + sponsor) anche per
+chi ha pagato, perché il file è uno solo e viene riusato dalla cache per tutti.
+
 ## Link accettati
 
 Basta che nel messaggio ci sia un link supportato: funziona anche se è in mezzo ad altro

@@ -128,6 +128,15 @@ def init_db(db_path: str) -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS ad_free (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                granted_at INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS callback_tokens (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 value TEXT NOT NULL
@@ -203,6 +212,38 @@ def get_url_cache(db_path: str, url_id: int) -> Optional[str]:
     with _connect(db_path) as conn:
         row = conn.execute("SELECT url FROM url_cache WHERE id=?", (url_id,)).fetchone()
     return row[0] if row else None
+
+def is_ad_free(db_path: str, user_id: int) -> bool:
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT 1 FROM ad_free WHERE user_id=? LIMIT 1", (user_id,)).fetchone()
+    return bool(row)
+
+
+def grant_ad_free(db_path: str, user_id: int, username: str = "") -> None:
+    now = int(time.time())
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO ad_free (user_id, username, granted_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET username=excluded.username
+            """,
+            (user_id, (username or "").lstrip("@").strip(), now),
+        )
+
+
+def revoke_ad_free(db_path: str, user_id: int) -> bool:
+    with _connect(db_path) as conn:
+        cur = conn.execute("DELETE FROM ad_free WHERE user_id=?", (user_id,))
+    return bool(cur.rowcount)
+
+
+def list_ad_free(db_path: str) -> list[tuple[int, str, int]]:
+    with _connect(db_path) as conn:
+        return conn.execute(
+            "SELECT user_id, username, granted_at FROM ad_free ORDER BY granted_at DESC"
+        ).fetchall()
+
 
 def save_token(db_path: str, value: str) -> int:
     with _connect(db_path) as conn:

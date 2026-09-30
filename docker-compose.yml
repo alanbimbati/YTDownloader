@@ -21,6 +21,8 @@ services:
       ADMIN_USER_ID: ${ADMIN_USER_ID}
       ADMIN_CONTACT: ${ADMIN_CONTACT:-}
       BITCOIN_CHANNEL: ${BITCOIN_CHANNEL:-@BitcoinPodcastTelegram}
+      AD_FREE_PRICE_SATS: ${AD_FREE_PRICE_SATS:-20000}
+      AD_FREE_PAYEE: ${AD_FREE_PAYEE:-@AlanBimbati}
       API_BASE_URL: http://telegram-bot-api:8081
       DB_PATH: /data/bot_cache.sqlite3
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-2146435072}

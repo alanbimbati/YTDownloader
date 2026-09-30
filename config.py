@@ -21,3 +21,7 @@ ADMIN_CONTACT = os.getenv("ADMIN_CONTACT", "").lstrip("@").strip()
 
 # Canale su cui il bot propone la pubblicazione dei video a tema bitcoin.
 BITCOIN_CHANNEL = os.getenv("BITCOIN_CHANNEL", "@BitcoinPodcastTelegram")
+
+# Sblocco "niente pubblicità", una tantum e a vita: prezzo e destinatario del pagamento.
+AD_FREE_PRICE_SATS = int(os.getenv("AD_FREE_PRICE_SATS", "20000"))
+AD_FREE_PAYEE = os.getenv("AD_FREE_PAYEE", "@AlanBimbati")
