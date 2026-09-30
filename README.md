@@ -49,9 +49,14 @@ Il bot userà automaticamente `API_BASE_URL=http://telegram-bot-api:8081` (Local
 Ogni messaggio del bot chiude con il blocco `Consigliati:` e una riga per sponsor attivo.
 Senza sponsor attivi il blocco non compare.
 
-Gestione dal pulsante **💼 Sponsor** (solo admin) o dai comandi:
+Gestione dal pulsante **💼 Sponsor**, visibile e utilizzabile solo da `ADMIN_USER_ID`:
+il pannello elenca gli sponsor, ognuno apre il proprio menu con ✏️ testo mostrato,
+👤 proprietario, 🔄 rinnovo e 🗑️ rimozione. Il testo mostrato è libero: ci si mette un
+nome, un link o un @handle (es. `@IlBarattoloBot`) e compare esattamente così.
 
-- `/sponsor` — pannello con la lista, ➕ per aggiungere, 🔄 per rinnovare, 🗑️ per togliere
+Restano i comandi equivalenti:
+
+- `/sponsor` — apre il pannello
 - `/sponsor_add Nome Sponsor [@username_proprietario]`
 - `/sponsor_remove Nome Sponsor`, `/sponsor_clear`
 
@@ -60,6 +65,12 @@ pulsante di rinnovo) e il proprietario, se ha già scritto al bot almeno una vol
 cui in fase di inserimento viene chiesto il suo username. Alla scadenza sparisce dai Consigliati e
 parte un secondo avviso. Il rinnovo aggiunge 30 giorni alla scadenza se è ancora valida, altrimenti
 riparte da oggi.
+
+## Link accettati
+
+Basta che nel messaggio ci sia un link supportato: funziona anche se è in mezzo ad altro
+testo, se il messaggio è inoltrato, se sta nella didascalia di una foto o di un video, o se
+è nascosto dietro un testo formattato. Il bot isola il link e ignora il resto.
 
 ## Pubblicazione sul canale bitcoin
 

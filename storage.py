@@ -286,6 +286,27 @@ def add_sponsor(db_path: str, name: str, owner_username: str = "", period_s: int
     return expires_at
 
 
+def rename_sponsor(db_path: str, old_name: str, new_name: str) -> bool:
+    """Cambia solo il testo mostrato: scadenza e proprietario restano quelli."""
+    with _connect(db_path) as conn:
+        try:
+            cur = conn.execute(
+                "UPDATE sponsors SET name=? WHERE name=?", (new_name.strip(), old_name.strip())
+            )
+        except sqlite3.IntegrityError:
+            return False
+    return bool(cur.rowcount)
+
+
+def set_sponsor_owner(db_path: str, name: str, owner_username: str) -> bool:
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE sponsors SET owner_username=? WHERE name=?",
+            ((owner_username or "").lstrip("@").strip(), name.strip()),
+        )
+    return bool(cur.rowcount)
+
+
 def renew_sponsor(db_path: str, name: str, period_s: int = SPONSOR_PERIOD_S) -> Optional[int]:
     """Il rinnovo riparte da oggi: una proroga decisa in ritardo non regala giorni già scaduti."""
     now = int(time.time())

@@ -252,9 +252,48 @@ def _propose_channel_publication(message: types.Message, title: str, terms: list
     )
 
 
+SUPPORTED_DOMAINS = (
+    "youtube.com", "youtu.be", "tiktok.com", "instagram.com",
+    "twitter.com", "x.com", "reddit.com",
+)
+
+_URL_RE = re.compile(
+    r"(?:https?://|www\.)\S+"
+    r"|(?<![\w.])(?:" + "|".join(re.escape(d) for d in SUPPORTED_DOMAINS) + r")/\S+",
+    re.IGNORECASE,
+)
+
+
 def _is_supported_url(text: str) -> bool:
     t = (text or "").lower().strip()
-    return any(domain in t for domain in ["youtube.com", "youtu.be", "tiktok.com", "instagram.com", "twitter.com", "x.com", "reddit.com"])
+    return any(domain in t for domain in SUPPORTED_DOMAINS)
+
+
+def _extract_supported_url(text: str) -> Optional[str]:
+    """Il link può stare in mezzo a un messaggio inoltrato: qui si isola dal testo attorno."""
+    for raw in _URL_RE.findall(text or ""):
+        candidate = raw.strip().rstrip(".,;:!?)]}>»\"'")
+        if not _is_supported_url(candidate):
+            continue
+        return candidate if candidate.lower().startswith("http") else f"https://{candidate}"
+    return None
+
+
+def _message_url(message: types.Message) -> Optional[str]:
+    text = message.text or message.caption or ""
+    if text.startswith("/"):
+        return None
+
+    found = _extract_supported_url(text)
+    if found:
+        return found
+
+    # Link nascosto dietro un testo formattato (tipico dei messaggi inoltrati).
+    for ent in list(message.entities or []) + list(message.caption_entities or []):
+        url = getattr(ent, "url", "") or ""
+        if url and _is_supported_url(url):
+            return url
+    return None
 
 
 def _user_label(user: Any) -> str:
@@ -386,19 +425,48 @@ def render_sponsor_panel(chat_id: int, message_id_to_edit: Optional[int] = None)
     now = int(time.time())
     sponsors = storage.list_sponsors_detailed(DB_PATH)
 
-    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(types.InlineKeyboardButton("➕ Aggiungi sponsor", callback_data="sp:add"))
     for s in sponsors:
         # Il nome può superare i 64 byte di callback_data: passiamo un token.
         tid = storage.save_token(DB_PATH, s["name"])
-        kb.add(
-            types.InlineKeyboardButton(f"🔄 Rinnova {s['name'][:18]}", callback_data=f"sp:renew:{tid}"),
-            types.InlineKeyboardButton(f"🗑️ Togli {s['name'][:18]}", callback_data=f"sp:rm:{tid}"),
-        )
+        kb.add(types.InlineKeyboardButton(f"⚙️ {s['name'][:40]}", callback_data=f"sp:ed:{tid}"))
 
     body = "\n".join(_sponsor_line(s, now) for s in sponsors) if sponsors else "Nessuno sponsor configurato."
-    text = f"💼 Sponsor (durata {SPONSOR_PERIOD_DAYS} giorni)\n\n{body}"
+    text = f"💼 Sponsor (durata {SPONSOR_PERIOD_DAYS} giorni)\n\n{body}\n\nTocca uno sponsor per modificarlo."
 
+    _show(chat_id, text, kb, message_id_to_edit)
+
+
+def render_sponsor_edit(chat_id: int, name: str, message_id_to_edit: Optional[int] = None) -> None:
+    sponsor = storage.get_sponsor(DB_PATH, name)
+    if not sponsor:
+        render_sponsor_panel(chat_id, message_id_to_edit)
+        return
+
+    tid = storage.save_token(DB_PATH, sponsor["name"])
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("✏️ Testo mostrato", callback_data=f"sp:txt:{tid}"),
+        types.InlineKeyboardButton("👤 Proprietario", callback_data=f"sp:own:{tid}"),
+    )
+    kb.add(
+        types.InlineKeyboardButton(f"🔄 Rinnova {SPONSOR_PERIOD_DAYS} giorni", callback_data=f"sp:renew:{tid}"),
+        types.InlineKeyboardButton("🗑️ Togli", callback_data=f"sp:rm:{tid}"),
+    )
+    kb.add(types.InlineKeyboardButton("⬅️ Indietro", callback_data="sp:back"))
+
+    owner = f"@{sponsor['owner_username']}" if sponsor["owner_username"] else "nessuno"
+    text = (
+        f"⚙️ {sponsor['name']}\n\n"
+        f"Mostrato sotto «Consigliati» esattamente così.\n"
+        f"Proprietario: {owner}\n"
+        f"Scadenza: {_fmt_day(sponsor['expires_at'])}"
+    )
+    _show(chat_id, text, kb, message_id_to_edit)
+
+
+def _show(chat_id: int, text: str, kb: types.InlineKeyboardMarkup, message_id_to_edit: Optional[int]) -> None:
     if message_id_to_edit:
         try:
             bot.edit_message_text(text, chat_id, message_id_to_edit, reply_markup=kb)
@@ -424,25 +492,62 @@ def handle_btn_sponsor(message: types.Message) -> None:
 def handle_sponsor_callbacks(call: types.CallbackQuery) -> None:
     try:
         if call.from_user.id != ADMIN_USER_ID:
-            bot.answer_callback_query(call.id, "Non autorizzato.")
+            bot.answer_callback_query(call.id, "Solo l'admin gestisce gli sponsor.")
             return
 
         parts = (call.data or "").split(":")
         action = parts[1]
+        chat_id = call.message.chat.id
+        msg_id = _get_msg_id(call.message)
+
+        if action == "back":
+            bot.answer_callback_query(call.id)
+            render_sponsor_panel(chat_id, msg_id)
+            return
 
         if action == "add":
             bot.answer_callback_query(call.id)
             msg = bot.send_message(
-                call.message.chat.id,
-                "Come si chiama lo sponsor?\n(/annulla per uscire)",
+                chat_id,
+                "Come si chiama lo sponsor?\n"
+                "Scrivilo esattamente come vuoi che appaia (es. @IlBarattoloBot).\n"
+                "(/annulla per uscire)",
                 reply_markup=types.ForceReply(),
             )
             bot.register_next_step_handler(msg, _sponsor_ask_owner)
             return
 
         name = storage.get_token(DB_PATH, int(parts[2]))
-        if not name:
-            bot.answer_callback_query(call.id, "Pulsante scaduto, riapri il pannello.")
+        if not name or not storage.get_sponsor(DB_PATH, name):
+            bot.answer_callback_query(call.id, "Sponsor non più presente, riapri il pannello.")
+            render_sponsor_panel(chat_id, msg_id)
+            return
+
+        if action == "ed":
+            bot.answer_callback_query(call.id)
+            render_sponsor_edit(chat_id, name, msg_id)
+            return
+
+        if action == "txt":
+            bot.answer_callback_query(call.id)
+            msg = bot.send_message(
+                chat_id,
+                f"Come deve apparire «{name}» sotto «Consigliati»?\n"
+                "Scrivi il testo esatto (es. @IlBarattoloBot).\n(/annulla per uscire)",
+                reply_markup=types.ForceReply(),
+            )
+            bot.register_next_step_handler(msg, _sponsor_rename, name)
+            return
+
+        if action == "own":
+            bot.answer_callback_query(call.id)
+            msg = bot.send_message(
+                chat_id,
+                f"Username Telegram del proprietario di «{name}»?\n"
+                "Serve per avvisarlo del rinnovo. Scrivi - per toglierlo.\n(/annulla per uscire)",
+                reply_markup=types.ForceReply(),
+            )
+            bot.register_next_step_handler(msg, _sponsor_set_owner, name)
             return
 
         # "renewn" arriva da un avviso di scadenza: lì confermiamo sul posto invece di aprire il pannello.
@@ -458,22 +563,20 @@ def handle_sponsor_callbacks(call: types.CallbackQuery) -> None:
             )
             if action == "renewn":
                 try:
-                    bot.edit_message_text(
-                        f"✅ «{name}» rinnovato fino al {_fmt_day(expires_at)}.",
-                        call.message.chat.id,
-                        call.message.message_id,
-                    )
+                    bot.edit_message_text(f"✅ «{name}» rinnovato fino al {_fmt_day(expires_at)}.", chat_id, msg_id)
                 except Exception:
                     pass
                 return
-        elif action == "rm":
-            storage.remove_sponsor(DB_PATH, name)
-            bot.answer_callback_query(call.id, f"Rimosso: {name}")
-        else:
-            bot.answer_callback_query(call.id, "Azione non valida.")
+            render_sponsor_edit(chat_id, name, msg_id)
             return
 
-        render_sponsor_panel(call.message.chat.id, _get_msg_id(call.message))
+        if action == "rm":
+            storage.remove_sponsor(DB_PATH, name)
+            bot.answer_callback_query(call.id, f"Rimosso: {name}")
+            render_sponsor_panel(chat_id, msg_id)
+            return
+
+        bot.answer_callback_query(call.id, "Azione non valida.")
     except Exception as e:
         try:
             bot.answer_callback_query(call.id, f"Errore: {e}")
@@ -481,10 +584,62 @@ def handle_sponsor_callbacks(call: types.CallbackQuery) -> None:
             pass
 
 
+def _sponsor_step_allowed(message: types.Message) -> bool:
+    return bool(message.from_user) and message.from_user.id == ADMIN_USER_ID
+
+
+def _sponsor_cancelled(message: types.Message) -> bool:
+    if (message.text or "").strip().lower() != "/annulla":
+        return False
+    bot.send_message(message.chat.id, "Operazione annullata.", reply_markup=main_menu_keyboard(ADMIN_USER_ID))
+    return True
+
+
+def _sponsor_rename(message: types.Message, name: str) -> None:
+    if not _sponsor_step_allowed(message) or _sponsor_cancelled(message):
+        return
+
+    new_name = (message.text or "").strip()
+    if not new_name or len(new_name) > 64:
+        bot.send_message(message.chat.id, "Testo mancante o troppo lungo (max 64).")
+        render_sponsor_edit(message.chat.id, name)
+        return
+
+    if new_name != name and not storage.rename_sponsor(DB_PATH, name, new_name):
+        bot.send_message(message.chat.id, f"Esiste già uno sponsor chiamato «{new_name}».")
+        render_sponsor_edit(message.chat.id, name)
+        return
+
+    bot.send_message(message.chat.id, f"✅ Ora sotto «Consigliati» appare: {new_name}")
+    render_sponsor_edit(message.chat.id, new_name)
+
+
+def _sponsor_set_owner(message: types.Message, name: str) -> None:
+    if not _sponsor_step_allowed(message) or _sponsor_cancelled(message):
+        return
+
+    raw = (message.text or "").strip()
+    owner = "" if raw in {"-", ""} else raw.lstrip("@").strip()
+    storage.set_sponsor_owner(DB_PATH, name, owner)
+    bot.send_message(message.chat.id, _owner_feedback(owner))
+    render_sponsor_edit(message.chat.id, name)
+
+
+def _owner_feedback(owner: str) -> str:
+    if not owner:
+        return "Nessun proprietario: del rinnovo avviserò solo te."
+    if storage.find_user_id_by_username(DB_PATH, owner) is None:
+        return f"@{owner} non ha mai scritto al bot: potrò avvisarlo solo dopo che lo avrà fatto."
+    return f"Avviserò @{owner} una settimana prima della scadenza."
+
+
 def _sponsor_ask_owner(message: types.Message) -> None:
+    if not _sponsor_step_allowed(message) or _sponsor_cancelled(message):
+        return
+
     name = (message.text or "").strip()
-    if not name or name.lower() == "/annulla":
-        bot.send_message(message.chat.id, "Operazione annullata.", reply_markup=main_menu_keyboard(ADMIN_USER_ID))
+    if not name:
+        bot.send_message(message.chat.id, "Nome mancante, riapri il pannello.")
         return
     if len(name) > 64:
         bot.send_message(message.chat.id, "Nome troppo lungo (max 64). Riapri il pannello e riprova.")
@@ -500,23 +655,18 @@ def _sponsor_ask_owner(message: types.Message) -> None:
 
 
 def _sponsor_save(message: types.Message, name: str) -> None:
-    raw = (message.text or "").strip()
-    if raw.lower() == "/annulla":
-        bot.send_message(message.chat.id, "Operazione annullata.", reply_markup=main_menu_keyboard(ADMIN_USER_ID))
+    if not _sponsor_step_allowed(message) or _sponsor_cancelled(message):
         return
 
+    raw = (message.text or "").strip()
     owner = "" if raw in {"-", ""} else raw.lstrip("@").strip()
     expires_at = storage.add_sponsor(DB_PATH, name, owner)
 
-    lines = [f"✅ «{name}» è tra i Consigliati fino al {_fmt_day(expires_at)}."]
-    if not owner:
-        lines.append("Nessun proprietario indicato: del rinnovo avviserò solo te.")
-    elif storage.find_user_id_by_username(DB_PATH, owner) is None:
-        lines.append(f"@{owner} non ha mai scritto al bot: potrò avvisarlo solo dopo che lo avrà fatto.")
-    else:
-        lines.append(f"Avviserò @{owner} una settimana prima della scadenza.")
-
-    bot.send_message(message.chat.id, "\n".join(lines), reply_markup=main_menu_keyboard(ADMIN_USER_ID))
+    bot.send_message(
+        message.chat.id,
+        f"✅ «{name}» è tra i Consigliati fino al {_fmt_day(expires_at)}.\n{_owner_feedback(owner)}",
+        reply_markup=main_menu_keyboard(ADMIN_USER_ID),
+    )
     render_sponsor_panel(message.chat.id)
 
 
@@ -1097,7 +1247,7 @@ def process_new_sub(message: types.Message) -> None:
     if not message.text or message.text.lower() == "/annulla":
         bot.reply_to(message, "Operazione annullata.", reply_markup=main_menu_keyboard(message.from_user.id))
         return
-    channel_url = (message.text or "").strip()
+    channel_url = _extract_supported_url(message.text or "") or (message.text or "").strip()
     if not _is_supported_url(channel_url):
          bot.reply_to(message, "Formato URL non valido.", reply_markup=main_menu_keyboard(message.from_user.id))
          return
@@ -1233,11 +1383,11 @@ def handle_sub(message: types.Message) -> None:
     if not _ensure_authorized(message):
         return
     raw = (message.text or "").split(maxsplit=1)
-    if not raw[1].strip():
+    if len(raw) < 2 or not raw[1].strip():
         bot.send_message(message.chat.id, _append_sponsor("Uso: /sub URL_CANALE_YOUTUBE", limit=TEXT_LIMIT), reply_to_message_id=_get_msg_id(message))
         return
         
-    url = raw[1].strip()
+    url = _extract_supported_url(raw[1]) or raw[1].strip()
     if not _is_supported_url(url):
         bot.send_message(message.chat.id, _append_sponsor("Inserisci un URL valido.", limit=TEXT_LIMIT), reply_to_message_id=_get_msg_id(message))
         return
@@ -1380,7 +1530,8 @@ for _ in range(2):
 
 
 @bot.message_handler(
-    func=lambda m: bool(m.text) and not (m.text or "").startswith("/") and _is_supported_url(m.text)
+    content_types=["text", "photo", "video", "animation", "document"],
+    func=lambda m: _message_url(m) is not None,
 )
 def handle_download(message: types.Message) -> None:
     if not _ensure_authorized(message):
@@ -1392,8 +1543,10 @@ def handle_download(message: types.Message) -> None:
             bot.reply_to(message, _append_sponsor("Hai raggiunto il limite di 3 download all'ora. Riprova più tardi.", limit=TEXT_LIMIT))
             return
 
-    url = (message.text or "").strip()
-    
+    url = _message_url(message)
+    if not url:
+        return
+
     # Invia scelte via InlineKeyboardMarkup
     url_id = storage.save_url_cache(DB_PATH, url)
     kb = types.InlineKeyboardMarkup(row_width=3)
