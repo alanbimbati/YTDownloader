@@ -1,23 +1,69 @@
-# YouTube to Telegram Uploader Bot
+# YTDownloader Telegram Bot
 
-Questo bot permette di scaricare video e audio da YouTube per caricarli su canali Telegram privati in modo completamente formattato. È pensato per arricchire i contenuti scaricati con una dicitura sponsorizzata e caricare file di grandi dimensioni sfruttando un Local Bot API Server.
+Questo bot scarica da YouTube e invia in chat:
+- thumbnail (foto)
+- video
+- audio
 
-## Caratteristiche
-- **Download da YouTube**: Scarica sia formati video che solo audio.
-- **Formattazione dei contenuti**: Formatta i contenuti testuali in modo pulito per Telegram.
-- **Dicitura Sponsorizzata**: Permette l'inserimento di messaggi promozionali e sponsor.
-- **Supporto per file di grandi dimensioni**: Utilizza le credenziali API di Telegram per un Local Bot API Server, gestendo file fino a 2GB.
+Usa cache su SQLite tramite `file_id` Telegram.
 
-## Configurazione
+## Limite upload (importante)
 
-1. Clona il repository.
-2. Rinomina `.env.example` in `.env` e inserisci i tuoi dati reali:
-   - `BOT_TOKEN`: Il token del tuo bot Telegram.
-   - `ADMIN_USER_ID`: Il tuo ID utente Telegram per l'accesso admin.
-   - `TELEGRAM_API_ID` e `TELEGRAM_API_HASH`: Le credenziali da [my.telegram.org](https://my.telegram.org) necessarie per caricare file di grandi dimensioni.
+Con i server ufficiali `https://api.telegram.org` l’upload via Bot API è limitato (documentato) a ~50MB.
+Per inviare file grandi (fino a ~2GB) devi usare un **Local Bot API Server** e puntare il bot su quello.
 
-## Avvio
-Puoi usare Docker per avviare l'intero ambiente facilmente:
-```bash
-docker-compose up -d
-```
+Se vedi errori tipo “Download incompleto (rimasti file .part)”, significa che `yt-dlp` non ha completato
+il download (spesso perché il file supera il limite effettivo quando usi i server ufficiali).
+
+## Avvio rapido con Docker Compose (consigliato, sblocca fino a ~2GB)
+
+1. Copia `.env.example` in `.env` e compila:
+   - `BOT_TOKEN`
+   - `ADMIN_USER_ID`
+   - `TELEGRAM_API_ID` e `TELEGRAM_API_HASH` (da https://my.telegram.org)
+2. Avvia:
+   - `docker compose up -d --build`
+
+Il bot userà automaticamente `API_BASE_URL=http://telegram-bot-api:8081` (Local Bot API Server).
+
+## Avvio senza Docker (limite ~50MB)
+
+1. Esporta variabili:
+   - `export BOT_TOKEN=...`
+   - `export ADMIN_USER_ID=...`
+2. Avvia:
+   - `python3 main.py`
+
+## Config
+
+- `BOT_TOKEN`: token BotFather
+- `ADMIN_USER_ID`: il tuo user id Telegram
+- `API_BASE_URL`: default `https://api.telegram.org` (per 2GB usa il local server)
+- `DB_PATH`: default `bot_cache.sqlite3`
+- `MAX_UPLOAD_BYTES`: limite massimo desiderato (2GB default). Su server ufficiali viene ridotto automaticamente.
+- `ADMIN_CONTACT`: username (senza `@`) mostrato agli sponsor per chiedere il rinnovo. Vuoto = riga omessa.
+- `BITCOIN_CHANNEL`: canale delle proposte di pubblicazione (default `@BitcoinPodcastTelegram`).
+
+## Sponsor ("Consigliati")
+
+Ogni messaggio del bot chiude con il blocco `Consigliati:` e una riga per sponsor attivo.
+Senza sponsor attivi il blocco non compare.
+
+Gestione dal pulsante **💼 Sponsor** (solo admin) o dai comandi:
+
+- `/sponsor` — pannello con la lista, ➕ per aggiungere, 🔄 per rinnovare, 🗑️ per togliere
+- `/sponsor_add Nome Sponsor [@username_proprietario]`
+- `/sponsor_remove Nome Sponsor`, `/sponsor_clear`
+
+Uno sponsor dura **30 giorni**. Una settimana prima della scadenza il bot avvisa l'admin (con il
+pulsante di rinnovo) e il proprietario, se ha già scritto al bot almeno una volta — è il motivo per
+cui in fase di inserimento viene chiesto il suo username. Alla scadenza sparisce dai Consigliati e
+parte un secondo avviso. Il rinnovo aggiunge 30 giorni alla scadenza se è ancora valida, altrimenti
+riparte da oggi.
+
+## Pubblicazione sul canale bitcoin
+
+Quando titolo, descrizione, tag o canale di un video contengono termini esplicitamente bitcoin
+(`bitcoin`, `btc`, `sats`, `satoshi`, `nakamoto`, `halving`, `hodl`, `lightning network`, `taproot`, `₿`…),
+il bot manda all'admin una proposta con i termini trovati e i pulsanti ✅ Pubblica / ❌ Scarta.
+Niente viene pubblicato su `BITCOIN_CHANNEL` senza quell'approvazione.

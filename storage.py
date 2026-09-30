@@ -4,6 +4,17 @@ import time
 from typing import Optional, TypedDict
 
 
+SPONSOR_PERIOD_S = 30 * 24 * 3600
+SPONSOR_WARN_S = 7 * 24 * 3600
+
+
+class Sponsor(TypedDict):
+    name: str
+    owner_username: str
+    added_at: int
+    expires_at: int
+
+
 class CacheEntry(TypedDict, total=False):
     yt_id: str
     title: str
@@ -38,7 +49,11 @@ def init_db(db_path: str) -> None:
             """
             CREATE TABLE IF NOT EXISTS sponsors (
                 name TEXT PRIMARY KEY COLLATE NOCASE,
-                added_at INTEGER NOT NULL
+                added_at INTEGER NOT NULL,
+                owner_username TEXT,
+                expires_at INTEGER,
+                renew_notified_at INTEGER,
+                expired_notified_at INTEGER
             )
             """
         )
@@ -110,6 +125,14 @@ def init_db(db_path: str) -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS callback_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS pending_forwards (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id TEXT NOT NULL,
@@ -129,6 +152,23 @@ def init_db(db_path: str) -> None:
             conn.execute("ALTER TABLE channels_state ADD COLUMN channel_title TEXT")
         except sqlite3.OperationalError:
             pass # already exists
+
+        for col, decl in (
+            ("owner_username", "TEXT"),
+            ("expires_at", "INTEGER"),
+            ("renew_notified_at", "INTEGER"),
+            ("expired_notified_at", "INTEGER"),
+        ):
+            try:
+                conn.execute(f"ALTER TABLE sponsors ADD COLUMN {col} {decl}")
+            except sqlite3.OperationalError:
+                pass # already exists
+
+        # Gli sponsor preesistenti non avevano scadenza: partono dal mese dalla data di inserimento.
+        conn.execute(
+            "UPDATE sponsors SET expires_at = added_at + ? WHERE expires_at IS NULL",
+            (SPONSOR_PERIOD_S,),
+        )
 
 
 def get_unique_users(db_path: str) -> list[int]:
@@ -156,6 +196,18 @@ def get_url_cache(db_path: str, url_id: int) -> Optional[str]:
         row = conn.execute("SELECT url FROM url_cache WHERE id=?", (url_id,)).fetchone()
     return row[0] if row else None
 
+def save_token(db_path: str, value: str) -> int:
+    with _connect(db_path) as conn:
+        cur = conn.execute("INSERT INTO callback_tokens (value) VALUES (?)", (value,))
+        return cur.lastrowid
+
+
+def get_token(db_path: str, token_id: int) -> Optional[str]:
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT value FROM callback_tokens WHERE id=?", (token_id,)).fetchone()
+    return row[0] if row else None
+
+
 def save_pending_forward(db_path: str, chat_id: str, msg_ids: str) -> int:
     with _connect(db_path) as conn:
         cur = conn.execute(
@@ -176,23 +228,142 @@ def delete_pending_forward(db_path: str, f_id: int) -> None:
 
 
 def list_sponsors(db_path: str) -> list[str]:
+    """Solo gli sponsor ancora validi: sono quelli mostrati sotto 'Consigliati'."""
+    now = int(time.time())
     with _connect(db_path) as conn:
-        rows = conn.execute("SELECT name FROM sponsors ORDER BY added_at ASC, name ASC").fetchall()
+        rows = conn.execute(
+            "SELECT name FROM sponsors WHERE expires_at > ? ORDER BY added_at ASC, name ASC",
+            (now,),
+        ).fetchall()
     return [r[0] for r in rows if r and r[0]]
 
 
-def add_sponsor(db_path: str, name: str) -> None:
+def list_sponsors_detailed(db_path: str) -> list[Sponsor]:
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT name, owner_username, added_at, expires_at
+            FROM sponsors ORDER BY expires_at ASC, name ASC
+            """
+        ).fetchall()
+    return [
+        {"name": r[0], "owner_username": r[1] or "", "added_at": r[2] or 0, "expires_at": r[3] or 0}
+        for r in rows
+    ]
+
+
+def get_sponsor(db_path: str, name: str) -> Optional[Sponsor]:
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT name, owner_username, added_at, expires_at
+            FROM sponsors WHERE name=?
+            """,
+            (name.strip(),),
+        ).fetchone()
+    if not row:
+        return None
+    return {"name": row[0], "owner_username": row[1] or "", "added_at": row[2] or 0, "expires_at": row[3] or 0}
+
+
+def add_sponsor(db_path: str, name: str, owner_username: str = "", period_s: int = SPONSOR_PERIOD_S) -> int:
     now = int(time.time())
+    expires_at = now + period_s
     with _connect(db_path) as conn:
         conn.execute(
             """
-            INSERT INTO sponsors (name, added_at)
-            VALUES (?, ?)
+            INSERT INTO sponsors (name, added_at, owner_username, expires_at, renew_notified_at, expired_notified_at)
+            VALUES (?, ?, ?, ?, NULL, NULL)
             ON CONFLICT(name) DO UPDATE SET
-                added_at=excluded.added_at
+                added_at=excluded.added_at,
+                owner_username=excluded.owner_username,
+                expires_at=excluded.expires_at,
+                renew_notified_at=NULL,
+                expired_notified_at=NULL
             """,
-            (name.strip(), now),
+            (name.strip(), now, (owner_username or "").lstrip("@").strip(), expires_at),
         )
+    return expires_at
+
+
+def renew_sponsor(db_path: str, name: str, period_s: int = SPONSOR_PERIOD_S) -> Optional[int]:
+    """Il rinnovo riparte da oggi: una proroga decisa in ritardo non regala giorni già scaduti."""
+    now = int(time.time())
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT expires_at FROM sponsors WHERE name=?", (name.strip(),)).fetchone()
+        if not row:
+            return None
+        base = max(int(row[0] or 0), now)
+        expires_at = base + period_s
+        conn.execute(
+            """
+            UPDATE sponsors
+            SET expires_at=?, renew_notified_at=NULL, expired_notified_at=NULL
+            WHERE name=?
+            """,
+            (expires_at, name.strip()),
+        )
+    return expires_at
+
+
+def sponsors_to_warn(db_path: str, window_s: int) -> list[Sponsor]:
+    now = int(time.time())
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT name, owner_username, added_at, expires_at
+            FROM sponsors
+            WHERE renew_notified_at IS NULL AND expires_at > ? AND expires_at <= ?
+            ORDER BY expires_at ASC
+            """,
+            (now, now + window_s),
+        ).fetchall()
+    return [
+        {"name": r[0], "owner_username": r[1] or "", "added_at": r[2] or 0, "expires_at": r[3] or 0}
+        for r in rows
+    ]
+
+
+def sponsors_just_expired(db_path: str) -> list[Sponsor]:
+    now = int(time.time())
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT name, owner_username, added_at, expires_at
+            FROM sponsors
+            WHERE expired_notified_at IS NULL AND expires_at <= ?
+            ORDER BY expires_at ASC
+            """,
+            (now,),
+        ).fetchall()
+    return [
+        {"name": r[0], "owner_username": r[1] or "", "added_at": r[2] or 0, "expires_at": r[3] or 0}
+        for r in rows
+    ]
+
+
+def mark_sponsor_warned(db_path: str, name: str) -> None:
+    now = int(time.time())
+    with _connect(db_path) as conn:
+        conn.execute("UPDATE sponsors SET renew_notified_at=? WHERE name=?", (now, name))
+
+
+def mark_sponsor_expired_notified(db_path: str, name: str) -> None:
+    now = int(time.time())
+    with _connect(db_path) as conn:
+        conn.execute("UPDATE sponsors SET expired_notified_at=? WHERE name=?", (now, name))
+
+
+def find_user_id_by_username(db_path: str, username: str) -> Optional[int]:
+    uname = (username or "").lstrip("@").strip()
+    if not uname:
+        return None
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT user_id FROM users WHERE username=? COLLATE NOCASE ORDER BY last_seen DESC LIMIT 1",
+            (uname,),
+        ).fetchone()
+    return int(row[0]) if row else None
 
 
 def remove_sponsor(db_path: str, name: str) -> int:

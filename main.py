@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import mimetypes
 from typing import Any, Optional
@@ -11,7 +12,15 @@ import yt_dlp
 from telebot import apihelper, types
 
 import storage
-from config import ADMIN_USER_ID, API_BASE_URL, BOT_TOKEN, DB_PATH, MAX_UPLOAD_BYTES
+from config import (
+    ADMIN_CONTACT,
+    ADMIN_USER_ID,
+    API_BASE_URL,
+    BITCOIN_CHANNEL,
+    BOT_TOKEN,
+    DB_PATH,
+    MAX_UPLOAD_BYTES,
+)
 
 
 DOWNLOAD_DIR = "downloads"
@@ -48,36 +57,34 @@ print(f"Max upload bytes (effective): {EFFECTIVE_MAX_UPLOAD_BYTES}")
 
 CAPTION_LIMIT = 1024
 TEXT_LIMIT = 4096
-SPONSOR_LABEL = "sponsorizzato da: "
+SPONSOR_HEADER = "Consigliati:"
+# Teniamo corto il blocco sponsor per non mangiare il testo nei caption.
+SPONSOR_BLOCK_MAX = 300
 
 
-def _sponsor_value(max_chars: int) -> str:
-    names = storage.list_sponsors(DB_PATH)
-    if not names:
-        return "—"
-
-    out = ""
-    for n in names:
-        n = (n or "").strip()
-        if not n:
+def _sponsor_block(max_chars: int) -> str:
+    block = SPONSOR_HEADER
+    for name in storage.list_sponsors(DB_PATH):
+        name = (name or "").strip()
+        if not name:
             continue
-        candidate = n if not out else f"{out}, {n}"
+        candidate = f"{block}\n• {name}"
         if len(candidate) > max_chars:
-            return (out + "…") if out else (candidate[: max(0, max_chars - 1)] + "…")
-        out = candidate
-    return out or "—"
+            break
+        block = candidate
+    return "" if block == SPONSOR_HEADER else block
 
 
 def _append_sponsor(text: str, *, limit: int) -> str:
     base = (text or "").strip()
-    if SPONSOR_LABEL in base.lower():
+    if SPONSOR_HEADER.lower() in base.lower():
+        return base[:limit]
+
+    suffix = _sponsor_block(min(SPONSOR_BLOCK_MAX, limit))
+    if not suffix:
         return base[:limit]
 
     sep = "\n\n" if base else ""
-    # Teniamo corta la lista sponsor per non sforare i caption.
-    sponsor_val = _sponsor_value(200)
-    suffix = f"{SPONSOR_LABEL}{sponsor_val}"
-
     if len(base) + len(sep) + len(suffix) <= limit:
         return f"{base}{sep}{suffix}".strip()
 
@@ -201,6 +208,50 @@ def _file_id_from_result(result: dict, kind: str) -> str:
     return obj.get("file_id") or ""
 
 
+# Solo termini che indicano bitcoin in modo esplicito: "blockchain" o "wallet" da soli
+# valgono per qualunque cripto e riempirebbero il canale di proposte sbagliate.
+BITCOIN_TERMS = (
+    "bitcoin", "bitcoiner", "bitcoiners", "btc", "₿",
+    "satoshi", "satoshis", "sats", "nakamoto",
+    "halving", "hodl", "lightning network", "taproot",
+)
+
+_BITCOIN_RE = re.compile(
+    r"(?<!\w)(" + "|".join(re.escape(t) for t in BITCOIN_TERMS) + r")(?!\w)",
+    re.IGNORECASE,
+)
+
+
+def _bitcoin_terms_in(info: dict) -> list[str]:
+    fields = [
+        info.get("title") or "",
+        info.get("description") or "",
+        info.get("channel") or "",
+        info.get("uploader") or "",
+    ]
+    fields += [str(t) for t in (info.get("tags") or [])]
+    fields += [str(c) for c in (info.get("categories") or [])]
+    found = {m.group(1).lower() for m in _BITCOIN_RE.finditer("\n".join(fields))}
+    return sorted(found)
+
+
+def _propose_channel_publication(message: types.Message, title: str, terms: list[str], msg_ids: list[int]) -> None:
+    fwd_id = storage.save_pending_forward(DB_PATH, str(message.chat.id), ",".join(str(m) for m in msg_ids))
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("✅ Pubblica", callback_data=f"fwd:ok:{fwd_id}"),
+        types.InlineKeyboardButton("❌ Scarta", callback_data=f"fwd:no:{fwd_id}"),
+    )
+    bot.send_message(
+        ADMIN_USER_ID,
+        f"₿ Video a tema bitcoin: «{title}»\n"
+        f"Termini trovati: {', '.join(terms)}\n"
+        f"Richiesto da: {_user_label(message.from_user)}\n\n"
+        f"Lo pubblico su {BITCOIN_CHANNEL}?",
+        reply_markup=kb,
+    )
+
+
 def _is_supported_url(text: str) -> bool:
     t = (text or "").lower().strip()
     return any(domain in t for domain in ["youtube.com", "youtu.be", "tiktok.com", "instagram.com", "twitter.com", "x.com", "reddit.com"])
@@ -307,33 +358,198 @@ def handle_whitelist_callback(call: types.CallbackQuery) -> None:
         bot.answer_callback_query(call.id, "Errore durante la gestione.")
 
 
+SPONSOR_PERIOD_DAYS = storage.SPONSOR_PERIOD_S // 86400
+
+
+def _is_admin(message: types.Message) -> bool:
+    if message.from_user and message.from_user.id == ADMIN_USER_ID:
+        return True
+    bot.reply_to(message, _append_sponsor("Non autorizzato.", limit=TEXT_LIMIT))
+    return False
+
+
+def _fmt_day(ts: int) -> str:
+    return time.strftime("%d/%m/%Y", time.localtime(ts))
+
+
+def _sponsor_line(sponsor: dict, now: int) -> str:
+    owner = f"@{sponsor['owner_username']}" if sponsor["owner_username"] else "nessun contatto"
+    left = sponsor["expires_at"] - now
+    if left <= 0:
+        state = f"⚠️ scaduto il {_fmt_day(sponsor['expires_at'])}"
+    else:
+        state = f"scade il {_fmt_day(sponsor['expires_at'])} (fra {max(1, left // 86400)} gg)"
+    return f"• {sponsor['name']} — {owner} — {state}"
+
+
+def render_sponsor_panel(chat_id: int, message_id_to_edit: Optional[int] = None) -> None:
+    now = int(time.time())
+    sponsors = storage.list_sponsors_detailed(DB_PATH)
+
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(types.InlineKeyboardButton("➕ Aggiungi sponsor", callback_data="sp:add"))
+    for s in sponsors:
+        # Il nome può superare i 64 byte di callback_data: passiamo un token.
+        tid = storage.save_token(DB_PATH, s["name"])
+        kb.add(
+            types.InlineKeyboardButton(f"🔄 Rinnova {s['name'][:18]}", callback_data=f"sp:renew:{tid}"),
+            types.InlineKeyboardButton(f"🗑️ Togli {s['name'][:18]}", callback_data=f"sp:rm:{tid}"),
+        )
+
+    body = "\n".join(_sponsor_line(s, now) for s in sponsors) if sponsors else "Nessuno sponsor configurato."
+    text = f"💼 Sponsor (durata {SPONSOR_PERIOD_DAYS} giorni)\n\n{body}"
+
+    if message_id_to_edit:
+        try:
+            bot.edit_message_text(text, chat_id, message_id_to_edit, reply_markup=kb)
+            return
+        except Exception:
+            pass
+    bot.send_message(chat_id, text, reply_markup=kb)
+
+
+@bot.message_handler(commands=["sponsor", "sponsor_list"])
+def handle_sponsor_panel(message: types.Message) -> None:
+    if not _is_admin(message):
+        return
+    render_sponsor_panel(message.chat.id)
+
+
+@bot.message_handler(func=lambda m: m.text == "💼 Sponsor")
+def handle_btn_sponsor(message: types.Message) -> None:
+    handle_sponsor_panel(message)
+
+
+@bot.callback_query_handler(func=lambda c: (c.data or "").startswith("sp:"))
+def handle_sponsor_callbacks(call: types.CallbackQuery) -> None:
+    try:
+        if call.from_user.id != ADMIN_USER_ID:
+            bot.answer_callback_query(call.id, "Non autorizzato.")
+            return
+
+        parts = (call.data or "").split(":")
+        action = parts[1]
+
+        if action == "add":
+            bot.answer_callback_query(call.id)
+            msg = bot.send_message(
+                call.message.chat.id,
+                "Come si chiama lo sponsor?\n(/annulla per uscire)",
+                reply_markup=types.ForceReply(),
+            )
+            bot.register_next_step_handler(msg, _sponsor_ask_owner)
+            return
+
+        name = storage.get_token(DB_PATH, int(parts[2]))
+        if not name:
+            bot.answer_callback_query(call.id, "Pulsante scaduto, riapri il pannello.")
+            return
+
+        # "renewn" arriva da un avviso di scadenza: lì confermiamo sul posto invece di aprire il pannello.
+        if action in ("renew", "renewn"):
+            expires_at = storage.renew_sponsor(DB_PATH, name)
+            if expires_at is None:
+                bot.answer_callback_query(call.id, "Sponsor non più presente.")
+                return
+            bot.answer_callback_query(call.id, f"Rinnovato fino al {_fmt_day(expires_at)}")
+            _notify_sponsor_owner(
+                storage.get_sponsor(DB_PATH, name) or {},
+                f"✅ Il tuo spazio «{name}» è stato rinnovato fino al {_fmt_day(expires_at)}.",
+            )
+            if action == "renewn":
+                try:
+                    bot.edit_message_text(
+                        f"✅ «{name}» rinnovato fino al {_fmt_day(expires_at)}.",
+                        call.message.chat.id,
+                        call.message.message_id,
+                    )
+                except Exception:
+                    pass
+                return
+        elif action == "rm":
+            storage.remove_sponsor(DB_PATH, name)
+            bot.answer_callback_query(call.id, f"Rimosso: {name}")
+        else:
+            bot.answer_callback_query(call.id, "Azione non valida.")
+            return
+
+        render_sponsor_panel(call.message.chat.id, _get_msg_id(call.message))
+    except Exception as e:
+        try:
+            bot.answer_callback_query(call.id, f"Errore: {e}")
+        except Exception:
+            pass
+
+
+def _sponsor_ask_owner(message: types.Message) -> None:
+    name = (message.text or "").strip()
+    if not name or name.lower() == "/annulla":
+        bot.send_message(message.chat.id, "Operazione annullata.", reply_markup=main_menu_keyboard(ADMIN_USER_ID))
+        return
+    if len(name) > 64:
+        bot.send_message(message.chat.id, "Nome troppo lungo (max 64). Riapri il pannello e riprova.")
+        return
+
+    msg = bot.send_message(
+        message.chat.id,
+        f"Qual è l'username Telegram del proprietario di «{name}»?\n"
+        "Serve per avvisarlo del rinnovo (es. @mario). Scrivi - se non ce l'hai.",
+        reply_markup=types.ForceReply(),
+    )
+    bot.register_next_step_handler(msg, _sponsor_save, name)
+
+
+def _sponsor_save(message: types.Message, name: str) -> None:
+    raw = (message.text or "").strip()
+    if raw.lower() == "/annulla":
+        bot.send_message(message.chat.id, "Operazione annullata.", reply_markup=main_menu_keyboard(ADMIN_USER_ID))
+        return
+
+    owner = "" if raw in {"-", ""} else raw.lstrip("@").strip()
+    expires_at = storage.add_sponsor(DB_PATH, name, owner)
+
+    lines = [f"✅ «{name}» è tra i Consigliati fino al {_fmt_day(expires_at)}."]
+    if not owner:
+        lines.append("Nessun proprietario indicato: del rinnovo avviserò solo te.")
+    elif storage.find_user_id_by_username(DB_PATH, owner) is None:
+        lines.append(f"@{owner} non ha mai scritto al bot: potrò avvisarlo solo dopo che lo avrà fatto.")
+    else:
+        lines.append(f"Avviserò @{owner} una settimana prima della scadenza.")
+
+    bot.send_message(message.chat.id, "\n".join(lines), reply_markup=main_menu_keyboard(ADMIN_USER_ID))
+    render_sponsor_panel(message.chat.id)
+
+
 @bot.message_handler(commands=["sponsor_add"])
 def handle_sponsor_add(message: types.Message) -> None:
-    if message.from_user.id != ADMIN_USER_ID:
-        bot.reply_to(message, _append_sponsor("Non autorizzato.", limit=TEXT_LIMIT))
+    if not _is_admin(message):
         return
 
     raw = (message.text or "").split(maxsplit=1)
     if len(raw) < 2 or not raw[1].strip():
         bot.reply_to(
             message,
-            _append_sponsor("Uso: /sponsor_add Nome Sponsor", limit=TEXT_LIMIT),
+            _append_sponsor("Uso: /sponsor_add Nome Sponsor [@username_proprietario]", limit=TEXT_LIMIT),
         )
         return
 
-    name = raw[1].strip()
-    if len(name) > 64:
-        bot.reply_to(message, _append_sponsor("Nome troppo lungo (max 64).", limit=TEXT_LIMIT))
+    args = raw[1].strip().split()
+    owner = args.pop().lstrip("@") if len(args) > 1 and args[-1].startswith("@") else ""
+    name = " ".join(args)
+    if not name or len(name) > 64:
+        bot.reply_to(message, _append_sponsor("Nome mancante o troppo lungo (max 64).", limit=TEXT_LIMIT))
         return
 
-    storage.add_sponsor(DB_PATH, name)
-    bot.reply_to(message, _append_sponsor(f"Aggiunto sponsor: {name}", limit=TEXT_LIMIT))
+    expires_at = storage.add_sponsor(DB_PATH, name, owner)
+    bot.reply_to(
+        message,
+        _append_sponsor(f"Aggiunto sponsor: {name} (fino al {_fmt_day(expires_at)})", limit=TEXT_LIMIT),
+    )
 
 
 @bot.message_handler(commands=["sponsor_remove", "sponsor_del"])
 def handle_sponsor_remove(message: types.Message) -> None:
-    if message.from_user.id != ADMIN_USER_ID:
-        bot.reply_to(message, _append_sponsor("Non autorizzato.", limit=TEXT_LIMIT))
+    if not _is_admin(message):
         return
 
     raw = (message.text or "").split(maxsplit=1)
@@ -352,29 +568,77 @@ def handle_sponsor_remove(message: types.Message) -> None:
         bot.reply_to(message, _append_sponsor(f"Sponsor non trovato: {name}", limit=TEXT_LIMIT))
 
 
-@bot.message_handler(commands=["sponsor_list"])
-def handle_sponsor_list(message: types.Message) -> None:
-    if message.from_user.id != ADMIN_USER_ID:
-        bot.reply_to(message, _append_sponsor("Non autorizzato.", limit=TEXT_LIMIT))
-        return
-
-    names = storage.list_sponsors(DB_PATH)
-    if not names:
-        bot.reply_to(message, _append_sponsor("Nessuno sponsor configurato.", limit=TEXT_LIMIT))
-        return
-
-    lines = "\n".join(f"- {n}" for n in names)
-    bot.reply_to(message, _append_sponsor(f"Sponsor attivi:\n{lines}", limit=TEXT_LIMIT))
-
-
 @bot.message_handler(commands=["sponsor_clear"])
 def handle_sponsor_clear(message: types.Message) -> None:
-    if message.from_user.id != ADMIN_USER_ID:
-        bot.reply_to(message, _append_sponsor("Non autorizzato.", limit=TEXT_LIMIT))
+    if not _is_admin(message):
         return
 
     removed = storage.clear_sponsors(DB_PATH)
     bot.reply_to(message, _append_sponsor(f"Lista sponsor svuotata ({removed}).", limit=TEXT_LIMIT))
+
+
+def _notify_sponsor_owner(sponsor: dict, text: str) -> bool:
+    user_id = storage.find_user_id_by_username(DB_PATH, sponsor.get("owner_username") or "")
+    if not user_id:
+        return False
+    try:
+        bot.send_message(user_id, text)
+        return True
+    except Exception as e:
+        print(f"Avviso sponsor a {sponsor.get('owner_username')} fallito: {e}")
+        return False
+
+
+def _renew_keyboard(name: str) -> types.InlineKeyboardMarkup:
+    tid = storage.save_token(DB_PATH, name)
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton(f"🔄 Rinnova {SPONSOR_PERIOD_DAYS} giorni", callback_data=f"sp:renewn:{tid}"))
+    return kb
+
+
+def _sponsor_renewal_hint() -> str:
+    return f"\nPer rinnovare scrivi a @{ADMIN_CONTACT}." if ADMIN_CONTACT else ""
+
+
+def _check_sponsor_deadlines() -> None:
+    for s in storage.sponsors_to_warn(DB_PATH, storage.SPONSOR_WARN_S):
+        days = max(1, (s["expires_at"] - int(time.time())) // 86400)
+        owner = f"@{s['owner_username']}" if s["owner_username"] else "nessun proprietario indicato"
+        reached = _notify_sponsor_owner(
+            s,
+            f"⏰ Il tuo spazio «{s['name']}» tra i Consigliati del bot scade il "
+            f"{_fmt_day(s['expires_at'])} (fra {days} giorni).{_sponsor_renewal_hint()}",
+        )
+        bot.send_message(
+            ADMIN_USER_ID,
+            f"⏰ Lo sponsor «{s['name']}» scade il {_fmt_day(s['expires_at'])} (fra {days} giorni).\n"
+            f"Proprietario: {owner}"
+            + ("" if reached or not s["owner_username"] else " — non raggiungibile, non ha mai scritto al bot"),
+            reply_markup=_renew_keyboard(s["name"]),
+        )
+        storage.mark_sponsor_warned(DB_PATH, s["name"])
+
+    for s in storage.sponsors_just_expired(DB_PATH):
+        _notify_sponsor_owner(
+            s,
+            f"🔚 Il tuo spazio «{s['name']}» tra i Consigliati è scaduto il "
+            f"{_fmt_day(s['expires_at'])} e non viene più mostrato.{_sponsor_renewal_hint()}",
+        )
+        bot.send_message(
+            ADMIN_USER_ID,
+            f"🔚 Lo sponsor «{s['name']}» è scaduto il {_fmt_day(s['expires_at'])}: non compare più tra i Consigliati.",
+            reply_markup=_renew_keyboard(s["name"]),
+        )
+        storage.mark_sponsor_expired_notified(DB_PATH, s["name"])
+
+
+def watch_sponsor_deadlines() -> None:
+    while True:
+        try:
+            _check_sponsor_deadlines()
+        except Exception as e:
+            print(f"Errore watcher sponsor: {e}")
+        time.sleep(6 * 3600)
 
 
 def _format_size(fmt: dict) -> Optional[int]:
@@ -800,10 +1064,12 @@ def _send_thumbnail(chat_id: int, thumb_url: str, caption: str, yt_id: str):
         raise last_exc
 
 
-def main_menu_keyboard():
+def main_menu_keyboard(user_id: Optional[int] = None):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(types.KeyboardButton("➕ Nuova Iscrizione"), types.KeyboardButton("📥 Le mie Iscrizioni"))
     kb.add(types.KeyboardButton("📊 Report Statistiche"), types.KeyboardButton("📣 Broadcast"))
+    if user_id == ADMIN_USER_ID:
+        kb.add(types.KeyboardButton("💼 Sponsor"))
     return kb
 
 @bot.message_handler(commands=["start", "help"])
@@ -817,7 +1083,7 @@ def handle_start(message: types.Message) -> None:
             "Usa il menu in basso per gestire le iscrizioni o accedere agli strumenti extra.",
             limit=TEXT_LIMIT,
         ),
-        reply_markup=main_menu_keyboard(),
+        reply_markup=main_menu_keyboard(message.from_user.id),
         reply_to_message_id=_get_msg_id(message)
     )
 
@@ -829,11 +1095,11 @@ def handle_btn_new_sub(message: types.Message) -> None:
 
 def process_new_sub(message: types.Message) -> None:
     if not message.text or message.text.lower() == "/annulla":
-        bot.reply_to(message, "Operazione annullata.", reply_markup=main_menu_keyboard())
+        bot.reply_to(message, "Operazione annullata.", reply_markup=main_menu_keyboard(message.from_user.id))
         return
     channel_url = (message.text or "").strip()
     if not _is_supported_url(channel_url):
-         bot.reply_to(message, "Formato URL non valido.", reply_markup=main_menu_keyboard())
+         bot.reply_to(message, "Formato URL non valido.", reply_markup=main_menu_keyboard(message.from_user.id))
          return
     message.text = f"/sub {channel_url}"
     handle_sub(message)
@@ -932,22 +1198,22 @@ def handle_fwd_choice(call: types.CallbackQuery) -> None:
         msg_ids = [int(m) for m in msg_ids_str.split(",") if m]
         
         if action == "ok":
-            bot.answer_callback_query(call.id, "Pubblicato sul canale!")
+            bot.answer_callback_query(call.id, f"Pubblicato su {BITCOIN_CHANNEL}!")
             try:
                 sticker_set = bot.get_sticker_set("BitcoinPodcast")
                 if sticker_set.stickers:
-                    bot.send_sticker("@BitcoinPodcastTelegram", sticker_set.stickers[0].file_id)
+                    bot.send_sticker(BITCOIN_CHANNEL, sticker_set.stickers[0].file_id)
             except Exception:
                 pass
                 
             for m_id in msg_ids:
                 try:
-                    bot.copy_message("@BitcoinPodcastTelegram", chat_id, m_id)
+                    bot.copy_message(BITCOIN_CHANNEL, chat_id, m_id)
                 except Exception as e:
                     print(f"Errore copy message to channel: {e}")
                     
             try:
-                bot.edit_message_text("✅ Approvato e pubblicato sul canale.", call.message.chat.id, call.message.message_id)
+                bot.edit_message_text(f"✅ Pubblicato su {BITCOIN_CHANNEL}.", call.message.chat.id, call.message.message_id)
             except Exception:
                 pass
         else:
@@ -1308,32 +1574,10 @@ def _process_download(task: DownloadTask) -> None:
         if isinstance(msg_audio, dict) and msg_audio.get("message_id"): sent_ids.append(msg_audio["message_id"])
         elif hasattr(msg_audio, "message_id"): sent_ids.append(msg_audio.message_id)
 
-        # Forward to channel if keywords match
-        caption = title.lower()
-        keywords = {"bitcoin", "blockchain", "satoshi", "nakamoto", "wallet"}
-        
-        if any(kw in caption for kw in keywords) and sent_ids:
-            if message.from_user.id == ADMIN_USER_ID or message.from_user.first_name == "Sub":
-                try:
-                    if sticker_file_id:
-                        bot.send_sticker("@BitcoinPodcastTelegram", sticker_file_id)
-                    for m_id in sent_ids:
-                        bot.copy_message("@BitcoinPodcastTelegram", message.chat.id, m_id)
-                except Exception as e:
-                    print(f"Errore durante l'inoltro al canale: {e}")
-            else:
-                msg_ids_str = ",".join(str(m) for m in sent_ids)
-                fwd_id = storage.save_pending_forward(DB_PATH, str(message.chat.id), msg_ids_str)
-                kb = types.InlineKeyboardMarkup(row_width=2)
-                kb.add(
-                    types.InlineKeyboardButton("✅ Approva", callback_data=f"fwd:ok:{fwd_id}"),
-                    types.InlineKeyboardButton("❌ Scarta", callback_data=f"fwd:no:{fwd_id}")
-                )
-                bot.send_message(
-                    ADMIN_USER_ID,
-                    f"💡 L'utente {_user_label(message.from_user)} ha scaricato un video (Title: {title}).\nApprovare l'inoltro sul canale?",
-                    reply_markup=kb
-                )
+        # Niente pubblicazione automatica: sul canale ci va solo quello che approvi.
+        terms = _bitcoin_terms_in(info if "info" in locals() else info_preview)
+        if terms and sent_ids:
+            _propose_channel_publication(message, title, terms, sent_ids)
 
         if status:
             bot.delete_message(message.chat.id, status.message_id)
@@ -1432,6 +1676,9 @@ def notify_subscribers(channel_url: str, video_url: str, channel_title: Optional
 
 poll_thread = threading.Thread(target=poll_subscriptions, daemon=True)
 poll_thread.start()
+
+sponsor_thread = threading.Thread(target=watch_sponsor_deadlines, daemon=True)
+sponsor_thread.start()
 
 print("Bot partito...")
 bot.infinity_polling(skip_pending=True)
