@@ -2086,7 +2086,11 @@ def _process_download(task: DownloadTask) -> None:
                 # Tutto il resto sul canale ci va solo se lo approvi.
                 terms = _bitcoin_terms_in(info if "info" in locals() else info_preview)
                 if terms:
-                    _propose_channel_publication(message, title, terms, sent_ids)
+                    if message.from_user.id == ADMIN_USER_ID:
+                        # L'admin è chi approverebbe: chiederglielo sarebbe solo un passaggio in più.
+                        _publish_to_channel(message.chat.id, sent_ids, sticker_file_id)
+                    else:
+                        _propose_channel_publication(message, title, terms, sent_ids)
 
         if status:
             bot.delete_message(message.chat.id, status.message_id)
