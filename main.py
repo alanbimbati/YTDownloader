@@ -1873,13 +1873,52 @@ def handle_sub_callbacks(call: types.CallbackQuery) -> None:
 
 
 class DownloadTask:
-    def __init__(self, message: types.Message, url: str, mode: str = "B", auto_publish: bool = False):
+    def __init__(self, message: types.Message, url: str, mode: str = "B", auto_publish: bool = False,
+                 from_subscription: bool = False):
         self.message = message
         self.url = url
         self.mode = mode
         self.auto_publish = auto_publish
+        self.from_subscription = from_subscription
+        self.first_seen = time.time()
+        self.postponed = False
 
 download_queue = queue.Queue()
+
+# Il feed dei canali elenca anche dirette e premiere programmate: non si possono ancora scaricare,
+# e una diretta in corso registrerebbe senza fine. Si riprovano finché non diventano un video normale.
+LIVE_RETRY_S = 3600
+LIVE_GIVE_UP_S = 4 * 24 * 3600
+_UPCOMING_RE = re.compile(r"live event will begin|Premieres in|is_upcoming|has not started", re.I)
+_postponed: list[tuple[float, "DownloadTask"]] = []
+_postponed_guard = threading.Lock()
+
+
+def _postpone(task: "DownloadTask") -> None:
+    if time.time() - task.first_seen > LIVE_GIVE_UP_S:
+        print(f"[Polling] Rinuncio a {task.url}: ancora non scaricabile dopo {LIVE_GIVE_UP_S // 86400} giorni")
+        return
+    if not task.postponed:
+        task.postponed = True
+        try:
+            bot.send_message(
+                task.message.chat.id,
+                _append_sponsor(f"📅 {task.url} è una diretta o premiere non ancora conclusa: la scarico appena possibile.",
+                                limit=TEXT_LIMIT, for_chat=task.message.chat.id),
+            )
+        except Exception as e:
+            print(f"Avviso rinvio fallito: {e}")
+    with _postponed_guard:
+        _postponed.append((time.time() + LIVE_RETRY_S, task))
+
+
+def _requeue_due_postponed() -> None:
+    now = time.time()
+    with _postponed_guard:
+        due = [t for at, t in _postponed if at <= now]
+        _postponed[:] = [(at, t) for at, t in _postponed if at > now]
+    for t in due:
+        download_queue.put(t)
 
 def queue_worker():
     while True:
@@ -1977,7 +2016,16 @@ def _process_download(task: DownloadTask) -> None:
 
         preview_opts = {"quiet": True, "noplaylist": True}
         with _ydl(preview_opts) as ydl:
-            info_preview = ydl.extract_info(url, download=False)
+            try:
+                info_preview = ydl.extract_info(url, download=False)
+            except Exception as e:
+                if task.from_subscription and _UPCOMING_RE.search(str(e)):
+                    _postpone(task)
+                    return
+                raise
+        if task.from_subscription and info_preview.get("live_status") in ("is_live", "is_upcoming", "post_live"):
+            _postpone(task)
+            return
 
         yt_id = info_preview.get("id") or str(int(time.time()))
         title = info_preview.get("title") or "Video"
@@ -2232,6 +2280,7 @@ def poll_subscriptions():
         except Exception as e:
             print(f"Errore generico polling thread: {e}")
 
+        _requeue_due_postponed()
         time.sleep(600)  # Controlla ogni 10 minuti
 
 
@@ -2260,7 +2309,8 @@ def notify_subscribers(channel_url: str, video_url: str, channel_title: Optional
                 "text": video_url,
             })
             download_queue.put(
-                DownloadTask(fake_message, video_url, mode="B", auto_publish=(user_id == ADMIN_USER_ID))
+                DownloadTask(fake_message, video_url, mode="B", auto_publish=(user_id == ADMIN_USER_ID),
+                             from_subscription=True)
             )
         except Exception as e:
             print(f"Errore nella notifica all'utente {user_id}: {e}")
