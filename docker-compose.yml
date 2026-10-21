@@ -25,6 +25,7 @@ services:
       AD_FREE_PAYEE: ${AD_FREE_PAYEE:-@AlanBimbati}
       API_BASE_URL: http://telegram-bot-api:8081
       DB_PATH: /data/bot_cache.sqlite3
+      COOKIES_FILE: /data/cookies.txt
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-2146435072}
     volumes:
       - ytdownloader-data:/data

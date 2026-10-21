@@ -25,3 +25,7 @@ BITCOIN_CHANNEL = os.getenv("BITCOIN_CHANNEL", "@BitcoinPodcastTelegram")
 # Sblocco "niente pubblicità", una tantum e a vita: prezzo e destinatario del pagamento.
 AD_FREE_PRICE_SATS = int(os.getenv("AD_FREE_PRICE_SATS", "20000"))
 AD_FREE_PAYEE = os.getenv("AD_FREE_PAYEE", "@AlanBimbati")
+
+# Cookie di YouTube (formato Netscape) di un account loggato: senza, dall'IP del Raspberry
+# YouTube risponde "Sign in to confirm you're not a bot". Se il file non c'è si va senza.
+COOKIES_FILE = os.getenv("COOKIES_FILE", "cookies.txt")

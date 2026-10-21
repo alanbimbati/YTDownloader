@@ -113,3 +113,21 @@ Per tutto il resto serve l'approvazione: quando titolo, descrizione, tag o canal
 contengono termini esplicitamente bitcoin (`bitcoin`, `btc`, `sats`, `satoshi`, `nakamoto`,
 `halving`, `hodl`, `lightning network`, `taproot`, `₿`…), il bot manda all'admin una proposta con i
 termini trovati e i pulsanti ✅ Pubblica / ❌ Scarta.
+
+## Cookie di YouTube (verifica anti-bot)
+
+Se YouTube risponde "Sign in to confirm you're not a bot", l'IP del server è stato segnalato e servono i
+cookie di un account loggato (meglio un account secondario). Esportali in formato Netscape da un browser
+(es. estensione "Get cookies.txt LOCALLY", da una finestra privata su youtube.com, poi chiudila senza
+uscire dall'account) e copiali nel volume del bot:
+
+```bash
+docker cp cookies.txt ytdownloader-ytdownloader-bot-1:/data/cookies.txt
+```
+
+Il file si rilegge a ogni download, non serve riavviare. Quando scadono il bot avvisa l'admin.
+
+## Iscrizioni ai canali
+
+`/sub` accetta il link di un canale (`@handle`, `/channel/UC…`) o di un qualsiasi video del canale.
+Ogni 10 minuti il bot legge il feed RSS del canale e scarica i video nuovi (al massimo 3 per giro).

@@ -6,6 +6,7 @@ import subprocess
 from typing import Any, Optional
 import queue
 import threading
+import xml.etree.ElementTree as ET
 
 import requests
 import telebot
@@ -21,6 +22,7 @@ from config import (
     API_BASE_URL,
     BITCOIN_CHANNEL,
     BOT_TOKEN,
+    COOKIES_FILE,
     DB_PATH,
     MAX_UPLOAD_BYTES,
 )
@@ -28,6 +30,43 @@ from config import (
 
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+
+def _ydl(opts: dict) -> yt_dlp.YoutubeDL:
+    # Riletto a ogni chiamata: i cookie scadono e si sostituiscono senza riavviare il bot.
+    if COOKIES_FILE and os.path.isfile(COOKIES_FILE):
+        opts = {**opts, "cookiefile": COOKIES_FILE}
+    return yt_dlp.YoutubeDL(opts)
+
+
+# Due worker possono ricevere lo stesso video (iscritti allo stesso canale, link inviato due volte):
+# scriverebbero sugli stessi file e la pulizia dell'uno cancellerebbe i pezzi dell'altro.
+_video_locks: dict[str, threading.Lock] = {}
+_video_locks_guard = threading.Lock()
+
+
+def _video_lock(yt_id: str) -> threading.Lock:
+    with _video_locks_guard:
+        return _video_locks.setdefault(yt_id, threading.Lock())
+
+
+_bot_check_alerted_at = 0.0
+
+
+def _alert_bot_check() -> None:
+    global _bot_check_alerted_at
+    if time.time() - _bot_check_alerted_at < 6 * 3600:
+        return
+    _bot_check_alerted_at = time.time()
+    state = "scaduti o non validi" if os.path.isfile(COOKIES_FILE) else f"assenti ({COOKIES_FILE})"
+    try:
+        bot.send_message(
+            ADMIN_USER_ID,
+            f"⚠️ YouTube chiede la verifica anti-bot: i cookie sono {state}. "
+            "Esportali da un browser loggato e copiali nel container.",
+        )
+    except Exception as e:
+        print(f"Avviso anti-bot all'admin fallito: {e}")
 
 storage.init_db(DB_PATH)
 storage.add_whitelist(DB_PATH, ADMIN_USER_ID, "admin")
@@ -1089,7 +1128,7 @@ def _latest_downloaded_path(prefix: str) -> str:
 
 def _download_video(url: str, yt_id: str) -> tuple[str, dict]:
     ydl_preview_opts = {"quiet": True, "noplaylist": True}
-    with yt_dlp.YoutubeDL(ydl_preview_opts) as ydl:
+    with _ydl(ydl_preview_opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
     fmt = _select_video_format_under_limit(info, EFFECTIVE_MAX_UPLOAD_BYTES)
@@ -1103,7 +1142,7 @@ def _download_video(url: str, yt_id: str) -> tuple[str, dict]:
         "merge_output_format": "mp4",
         "max_filesize": EFFECTIVE_MAX_UPLOAD_BYTES,
     }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    with _ydl(ydl_opts) as ydl:
         ydl.extract_info(url, download=True)
     preferred = os.path.join(DOWNLOAD_DIR, f"{yt_id}_video.mp4")
     if os.path.exists(preferred):
@@ -1152,13 +1191,13 @@ def _download_audio(url: str, yt_id: str, info: dict) -> str:
         "writethumbnail": True,
     }
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with _ydl(ydl_opts) as ydl:
             ydl.extract_info(url, download=True)
     except Exception as e:
         print(f"Conversione mp3 fallita, ripiego sul flusso originale: {e}")
         ydl_opts.pop("postprocessors", None)
         ydl_opts.pop("writethumbnail", None)
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with _ydl(ydl_opts) as ydl:
             ydl.extract_info(url, download=True)
 
     preferred_exts = (".mp3", ".m4a", ".webm", ".mp4", ".aac", ".opus", ".ogg")
@@ -1725,7 +1764,7 @@ def handle_sub(message: types.Message) -> None:
     # Get channel title
     title = url
     try:
-        with yt_dlp.YoutubeDL({"quiet": True, "noplaylist": True, "extract_flat": True}) as ydl:
+        with _ydl({"quiet": True, "noplaylist": True, "extract_flat": True}) as ydl:
             c_info = ydl.extract_info(url, download=False)
             title = c_info.get("channel") or c_info.get("title") or url
             storage.update_channel_state(DB_PATH, url, channel_title=title)
@@ -1926,6 +1965,7 @@ def _process_download(task: DownloadTask) -> None:
     video_path = None
     audio_path = None
     thumb_path = None
+    lock = None
 
     try:
         msg_id = _get_msg_id(message)
@@ -1936,12 +1976,14 @@ def _process_download(task: DownloadTask) -> None:
         )
 
         preview_opts = {"quiet": True, "noplaylist": True}
-        with yt_dlp.YoutubeDL(preview_opts) as ydl:
+        with _ydl(preview_opts) as ydl:
             info_preview = ydl.extract_info(url, download=False)
 
         yt_id = info_preview.get("id") or str(int(time.time()))
         title = info_preview.get("title") or "Video"
-        
+        lock = _video_lock(yt_id)
+        lock.acquire()
+
         # Send the sticker to the user
         sticker_file_id = None
         try:
@@ -2097,9 +2139,13 @@ def _process_download(task: DownloadTask) -> None:
 
     except Exception as e:
         msg_id = _get_msg_id(message)
+        text = f"Errore: {e}"
+        if "confirm you" in str(e) and "not a bot" in str(e):
+            _alert_bot_check()
+            text = "YouTube sta bloccando i download dal server (verifica anti-bot). L'amministratore è avvisato: riprova più tardi."
         bot.send_message(
             message.chat.id,
-            _append_sponsor(f"Errore: {str(e)}", limit=TEXT_LIMIT, for_chat=message.chat.id),
+            _append_sponsor(text, limit=TEXT_LIMIT, for_chat=message.chat.id),
             reply_to_message_id=msg_id if msg_id and msg_id > 0 else None
         )
     finally:
@@ -2128,46 +2174,64 @@ def _process_download(task: DownloadTask) -> None:
                 bot.delete_message(message.chat.id, status.message_id)
             except Exception:
                 pass
+        if lock:
+            lock.release()
+
+
+_FEED_NS = {"a": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015"}
+
+
+def _channel_id_for(url: str) -> Optional[str]:
+    m = re.search(r"/channel/(UC[\w-]{22})", url)
+    if m:
+        return m.group(1)
+    stored = storage.get_channel_id(DB_PATH, url)
+    if stored:
+        return stored
+    # Un'iscrizione può essere un @handle o il link di un video del canale: si risolve una volta sola.
+    with _ydl({"quiet": True, "noplaylist": True, "extract_flat": True, "playlistend": 1}) as ydl:
+        info = ydl.extract_info(url, download=False)
+    cid = info.get("channel_id") or (info.get("id") if str(info.get("id", "")).startswith("UC") else None)
+    if cid:
+        storage.set_channel_id(DB_PATH, url, cid)
+    return cid
+
+
+def _feed_video_ids(channel_id: str) -> tuple[list[str], Optional[str]]:
+    # Il feed RSS è leggero e non passa dalla verifica anti-bot che blocca le pagine del canale.
+    r = requests.get(f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}", timeout=20)
+    r.raise_for_status()
+    root = ET.fromstring(r.content)
+    ids = [e.findtext("yt:videoId", namespaces=_FEED_NS) for e in root.findall("a:entry", _FEED_NS)]
+    return [i for i in ids if i], root.findtext("a:title", namespaces=_FEED_NS)
 
 
 def poll_subscriptions():
     while True:
         try:
-            channels = storage.get_distinct_subscribed_channels(DB_PATH)
-            for channel_url in channels:
-                ydl_opts = {
-                    "quiet": True,
-                    "noplaylist": True,
-                    "extract_flat": "in_playlist",
-                    "playlistend": 5
-                }
+            for channel_url in storage.get_distinct_subscribed_channels(DB_PATH):
                 try:
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = ydl.extract_info(channel_url, download=False)
-                        entries = info.get("entries", [])
-                        if not entries:
-                            continue
-                        latest_video = entries[0]
-                        latest_id = latest_video.get("id")
-                        latest_url = latest_video.get("url") or f"https://www.youtube.com/watch?v={latest_id}"
-                        
-                        last_saved_id = storage.get_channel_state(DB_PATH, channel_url)
-                        # Store channel title if it's the first time
-                        c_title = info.get("channel") or info.get("title")
-                        
-                        if latest_id and latest_id != last_saved_id:
-                            print(f"[Polling] Nuovo video trovato per {c_title or channel_url}: {latest_id}")
-                            storage.update_channel_state(DB_PATH, channel_url, latest_id, channel_title=c_title)
-                            # Only notify if it's not the first time checking
-                            if last_saved_id is not None:
-                                notify_subscribers(channel_url, latest_url, c_title)
-                        elif c_title:
-                             storage.update_channel_state(DB_PATH, channel_url, channel_title=c_title)
+                    channel_id = _channel_id_for(channel_url)
+                    if not channel_id:
+                        continue
+                    ids, c_title = _feed_video_ids(channel_id)
+                    if not ids:
+                        continue
+                    last_saved_id = storage.get_channel_state(DB_PATH, channel_url)
+                    storage.update_channel_state(DB_PATH, channel_url, ids[0], channel_title=c_title or None)
+                    # Senza un ultimo video riconoscibile (prima volta, o stato vecchio) si fissa solo il punto
+                    # di partenza: scaricare tutto il feed sarebbe un'alluvione.
+                    if last_saved_id not in ids:
+                        continue
+                    new_ids = ids[:ids.index(last_saved_id)][:3]
+                    for vid in reversed(new_ids):
+                        print(f"[Polling] Nuovo video per {c_title or channel_url}: {vid}")
+                        notify_subscribers(channel_url, f"https://www.youtube.com/watch?v={vid}", c_title)
                 except Exception as e:
                     print(f"Errore polling canale {channel_url}: {e}")
         except Exception as e:
             print(f"Errore generico polling thread: {e}")
-            
+
         time.sleep(600)  # Controlla ogni 10 minuti
 
 

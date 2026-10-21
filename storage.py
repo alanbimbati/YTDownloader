@@ -166,6 +166,11 @@ def init_db(db_path: str) -> None:
             pass # already exists
 
         try:
+            conn.execute("ALTER TABLE channels_state ADD COLUMN channel_id TEXT")
+        except sqlite3.OperationalError:
+            pass # already exists
+
+        try:
             conn.execute("ALTER TABLE cache ADD COLUMN fmt_v INTEGER NOT NULL DEFAULT 0")
         except sqlite3.OperationalError:
             pass # already exists
@@ -667,6 +672,26 @@ def get_channel_state(db_path: str, channel_url: str) -> Optional[str]:
     if row:
         return row[0]
     return None
+
+
+def get_channel_id(db_path: str, channel_url: str) -> Optional[str]:
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT channel_id FROM channels_state WHERE channel_url=?", (channel_url,)
+        ).fetchone()
+    return row[0] if row else None
+
+
+def set_channel_id(db_path: str, channel_url: str, channel_id: str) -> None:
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO channels_state (channel_url, channel_id, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(channel_url) DO UPDATE SET channel_id=excluded.channel_id
+            """,
+            (channel_url, channel_id, int(time.time())),
+        )
 
 
 def update_channel_state(db_path: str, channel_url: str, last_video_id: Optional[str] = None, channel_title: Optional[str] = None) -> None:
