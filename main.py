@@ -2251,14 +2251,14 @@ def notify_subscribers(channel_url: str, video_url: str, channel_title: Optional
             
             # Create a fake message object for the background download
             # We use message_id=-1 or 0 to indicate a background task
-            fake_message = types.Message(
-                message_id=0,
-                from_user=types.User(id=user_id, is_bot=False, first_name="Sub", username="sub"),
-                date=int(time.time()),
-                chat=types.Chat(id=user_id, type="private"),
-                content_type="text",
-                options={}
-            )
+            # de_json: il costruttore di Message cambia firma tra le versioni di pyTelegramBotAPI.
+            fake_message = types.Message.de_json({
+                "message_id": 0,
+                "from": {"id": user_id, "is_bot": False, "first_name": "Sub", "username": "sub"},
+                "date": int(time.time()),
+                "chat": {"id": user_id, "type": "private"},
+                "text": video_url,
+            })
             download_queue.put(
                 DownloadTask(fake_message, video_url, mode="B", auto_publish=(user_id == ADMIN_USER_ID))
             )
