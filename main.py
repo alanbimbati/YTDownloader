@@ -963,6 +963,9 @@ def _audio_quality_key(fmt: dict) -> tuple:
 def _select_video_format_under_limit(info: dict, limit_bytes: int) -> str:
     formats = info.get("formats") or []
     duration_s = info.get("duration")
+    # Il download rifà l'estrazione e YouTube può rispondere con id diversi (es. 140-1 invece di 140,
+    # sui video con più lingue audio): l'id scelto va sempre seguito da un'alternativa generica.
+    fallback = _fallback_video_format(limit_bytes)
 
     progressive = [
         f
@@ -981,7 +984,7 @@ def _select_video_format_under_limit(info: dict, limit_bytes: int) -> str:
     ]
     if progressive_ok:
         best = max(progressive_ok, key=_video_quality_key)
-        return str(best["format_id"])
+        return f"{best['format_id']}/{fallback}"
 
     video_only = [
         f
@@ -1017,8 +1020,12 @@ def _select_video_format_under_limit(info: dict, limit_bytes: int) -> str:
                 best_audio = a
                 break
         if best_audio:
-            return f"{v['format_id']}+{best_audio['format_id']}"
+            return f"{v['format_id']}+{best_audio['format_id']}/{fallback}"
 
+    return fallback
+
+
+def _fallback_video_format(limit_bytes: int) -> str:
     # Fallback conservativo: limita l'altezza per aumentare le chance di stare sotto il limite.
     limit_mb = limit_bytes / (1024 * 1024)
     if limit_mb <= 60:
@@ -1056,7 +1063,7 @@ def _select_audio_format_under_limit(info: dict, limit_bytes: int) -> str:
     ]
     if audio_ok:
         best = max(audio_ok, key=_audio_quality_key)
-        return str(best["format_id"])
+        return f"{best['format_id']}/bestaudio/best"
     return "bestaudio/best"
 
 
