@@ -568,6 +568,14 @@ def upsert_user(db_path: str, user_id: int, first_name: str, username: str) -> N
         )
 
 
+def has_downloaded(db_path: str, user_id: int, yt_id: str) -> bool:
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM downloads_log WHERE user_id=? AND yt_id=? LIMIT 1", (user_id, yt_id)
+        ).fetchone()
+    return row is not None
+
+
 def log_download(db_path: str, user_id: int, yt_id: str, yt_title: Optional[str] = None) -> None:
     now = int(time.time())
     with _connect(db_path) as conn:

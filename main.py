@@ -2038,6 +2038,9 @@ def _process_download(task: DownloadTask) -> None:
         title = info_preview.get("title") or "Video"
         lock = _video_lock(yt_id)
         lock.acquire()
+        # Lo stesso canale può arrivare da due iscrizioni (handle e link di un video): una volta basta.
+        if task.from_subscription and storage.has_downloaded(DB_PATH, message.from_user.id, yt_id):
+            return
 
         # Send the sticker to the user
         sticker_file_id = None
