@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import html
 import mimetypes
 import subprocess
 from typing import Any, Optional
@@ -155,6 +156,27 @@ def _append_sponsor(text: str, *, limit: int, for_chat: Optional[int] = None) ->
     return combined
 
 
+def _media_caption(text: str, *, for_chat: Optional[int] = None, source_url: str = "",
+                   limit: int = CAPTION_LIMIT) -> str:
+    """HTML: il titolo del video può contenere < > &, quindi va escapato prima del link."""
+    source = f'<a href="{html.escape(source_url, quote=True)}">Fonte</a>' if source_url else ""
+    sponsor = "" if _is_ad_free(for_chat) else _sponsor_block(min(SPONSOR_BLOCK_MAX, limit))
+
+    # Il limite di Telegram conta il testo visibile, non i tag.
+    tail = ("\n\nFonte" if source else "") + (f"\n\n{sponsor}" if sponsor else "")
+    base = (text or "").strip()
+    room = limit - len(tail)
+    if len(base) > room:
+        base = base[: max(0, room - 1)] + "…" if room > 1 else ""
+
+    out = html.escape(base)
+    if source:
+        out = f"{out}\n\n{source}" if out else source
+    if sponsor:
+        out = f"{out}\n\n{html.escape(sponsor)}" if out else html.escape(sponsor)
+    return out
+
+
 def _get_msg_id(m: Any) -> Optional[int]:
     if m is None: return None
     if isinstance(m, dict):
@@ -194,7 +216,7 @@ def _tg_send_video_file(
 ) -> dict:
     filename = f"{_safe_filename(title)}{os.path.splitext(file_path)[1] or '.mp4'}"
     mime = _guess_mime(file_path, "video/mp4")
-    data = {"chat_id": str(chat_id), "caption": caption, "supports_streaming": "true"}
+    data = {"chat_id": str(chat_id), "caption": caption, "parse_mode": "HTML", "supports_streaming": "true"}
     # Senza questi Telegram deve indovinare il frame di copertina, e spesso ne pesca uno nero.
     if duration:
         data["duration"] = str(int(duration))
@@ -229,7 +251,7 @@ def _tg_send_document_file(chat_id: int, file_path: str, caption: str, title: st
         f.seek(0)
         return _tg_post(
             "sendDocument",
-            {"chat_id": str(chat_id), "caption": caption},
+            {"chat_id": str(chat_id), "caption": caption, "parse_mode": "HTML"},
             files={"document": (filename, f, mime)},
             timeout_s=60 * 20,
         )
@@ -249,7 +271,7 @@ def _tg_send_audio_file(
     # Il nome che il telefono propone al salvataggio: deve avere l'estensione giusta.
     filename = f"{_safe_filename(title)}{ext}"
     mime = "audio/mpeg" if ext == ".mp3" else _guess_mime(file_path, "audio/mp4")
-    data = {"chat_id": str(chat_id), "caption": caption, "title": title}
+    data = {"chat_id": str(chat_id), "caption": caption, "parse_mode": "HTML", "title": title}
     if duration:
         data["duration"] = str(int(duration))
     if performer:
@@ -281,7 +303,7 @@ def _tg_send_photo(chat_id: int, photo: str, caption: str) -> dict:
     # photo può essere URL oppure "attach://..." (non usato qui). Se serve file locale, usare sendPhoto con files.
     return _tg_post(
         "sendPhoto",
-        {"chat_id": str(chat_id), "photo": photo, "caption": caption},
+        {"chat_id": str(chat_id), "photo": photo, "caption": caption, "parse_mode": "HTML"},
         timeout_s=60,
     )
 
@@ -295,7 +317,7 @@ def _tg_send_photo_file(chat_id: int, file_path: str, caption: str, title: str =
         f.seek(0)
         return _tg_post(
             "sendPhoto",
-            {"chat_id": str(chat_id), "caption": caption},
+            {"chat_id": str(chat_id), "caption": caption, "parse_mode": "HTML"},
             files={"photo": (filename, f, mime)},
             timeout_s=60,
         )
@@ -1352,8 +1374,9 @@ def _send_video_or_document(
     duration: Optional[int] = None,
     width: Optional[int] = None,
     height: Optional[int] = None,
+    source_url: str = "",
 ):
-    caption = _append_sponsor(caption, limit=CAPTION_LIMIT, for_chat=chat_id)
+    caption = _media_caption(caption, for_chat=chat_id, source_url=source_url)
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File non trovato: {file_path}")
     size = os.path.getsize(file_path)
@@ -1400,8 +1423,9 @@ def _send_audio(
     thumb_path: Optional[str] = None,
     duration: Optional[int] = None,
     performer: Optional[str] = None,
+    source_url: str = "",
 ):
-    caption = _append_sponsor(caption, limit=CAPTION_LIMIT, for_chat=chat_id)
+    caption = _media_caption(caption, for_chat=chat_id, source_url=source_url)
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File non trovato: {file_path}")
     size = os.path.getsize(file_path)
@@ -1424,8 +1448,9 @@ def _send_audio(
         raise last_exc
 
 
-def _send_thumbnail(chat_id: int, thumb_url: str, caption: str, yt_id: str, title: str = ""):
-    caption = _append_sponsor(caption, limit=CAPTION_LIMIT, for_chat=chat_id)
+def _send_thumbnail(chat_id: int, thumb_url: str, caption: str, yt_id: str, title: str = "",
+                    source_url: str = ""):
+    caption = _media_caption(caption, for_chat=chat_id, source_url=source_url)
     # Prova 1: lascia che Telegram scarichi l'URL (più veloce).
     try:
         return _tg_send_photo(chat_id, thumb_url, caption)
@@ -2036,6 +2061,8 @@ def _process_download(task: DownloadTask) -> None:
 
         yt_id = info_preview.get("id") or str(int(time.time()))
         title = info_preview.get("title") or "Video"
+        # webpage_url è il link pulito (watch?v=…), senza i parametri di condivisione.
+        source_url = info_preview.get("webpage_url") or url
         lock = _video_lock(yt_id)
         lock.acquire()
         # Lo stesso canale può arrivare da due iscrizioni (handle e link di un video): una volta basta.
@@ -2062,7 +2089,8 @@ def _process_download(task: DownloadTask) -> None:
             msg_photo = bot.send_photo(
                 message.chat.id,
                 cached["thumb_file_id"],
-                caption=_append_sponsor(f"📸 {title}", limit=CAPTION_LIMIT, for_chat=message.chat.id),
+                caption=_media_caption(f"📸 {title}", for_chat=message.chat.id, source_url=source_url),
+                parse_mode="HTML",
             )
             if mode in ["V", "B"]:
                 try:
@@ -2070,21 +2098,24 @@ def _process_download(task: DownloadTask) -> None:
                         bot.send_video,
                         message.chat.id,
                         cached["video_file_id"],
-                        caption=_append_sponsor("🎬 Video (cache)", limit=CAPTION_LIMIT, for_chat=message.chat.id),
+                        caption=_media_caption("🎬 Video (cache)", for_chat=message.chat.id, source_url=source_url),
+                        parse_mode="HTML",
                     )
                 except Exception:
                     msg_video = _send_with_retry(
                         bot.send_document,
                         message.chat.id,
                         cached["video_file_id"],
-                        caption=_append_sponsor("🎬 Video (cache)", limit=CAPTION_LIMIT, for_chat=message.chat.id),
+                        caption=_media_caption("🎬 Video (cache)", for_chat=message.chat.id, source_url=source_url),
+                        parse_mode="HTML",
                     )
             if mode in ["A", "B"]:
                 msg_audio = _send_with_retry(
                     bot.send_audio,
                     message.chat.id,
                     cached["audio_file_id"],
-                    caption=_append_sponsor("🎵 Audio (cache)", limit=CAPTION_LIMIT, for_chat=message.chat.id),
+                    caption=_media_caption("🎵 Audio (cache)", for_chat=message.chat.id, source_url=source_url),
+                    parse_mode="HTML",
                 )
             
             storage.log_download(DB_PATH, message.from_user.id, yt_id, yt_title=title)
@@ -2117,7 +2148,7 @@ def _process_download(task: DownloadTask) -> None:
                     _tag_media(path, title=title, performer=performer or "", source_url=url)
 
             try:
-                thumb_result = _send_thumbnail(message.chat.id, thumb_url, f"📸 {title}", yt_id, title)
+                thumb_result = _send_thumbnail(message.chat.id, thumb_url, f"📸 {title}", yt_id, title, source_url=source_url)
                 if isinstance(thumb_result, tuple):
                     msg_photo, thumb_path = thumb_result
                 else:
@@ -2134,6 +2165,7 @@ def _process_download(task: DownloadTask) -> None:
                         duration=duration,
                         width=meta.get("width") or None,
                         height=meta.get("height") or None,
+                        source_url=source_url,
                     )
                 except Exception as e:
                     vsz = os.path.getsize(video_path) if os.path.exists(video_path) else -1
@@ -2146,6 +2178,7 @@ def _process_download(task: DownloadTask) -> None:
                         thumb_path=small_thumb,
                         duration=duration,
                         performer=performer,
+                        source_url=source_url,
                     )
                 except Exception as e:
                     asz = os.path.getsize(audio_path) if os.path.exists(audio_path) else -1
