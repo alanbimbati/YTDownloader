@@ -976,10 +976,13 @@ def _video_quality_key(fmt: dict) -> tuple:
 
 
 def _audio_quality_key(fmt: dict) -> tuple:
+    # Con il doppiaggio automatico di YouTube ogni video ha più tracce audio, spesso con lo stesso
+    # bitrate: la lingua originale (language_preference 10, i doppiaggi -1) deve vincere sulla qualità.
+    lang = fmt.get("language_preference") or 0
     abr = fmt.get("abr") or 0
     tbr = fmt.get("tbr") or 0
     asr = fmt.get("asr") or 0
-    return (abr, tbr, asr)
+    return (lang, abr, tbr, asr)
 
 
 def _select_video_format_under_limit(info: dict, limit_bytes: int) -> str:
