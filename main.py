@@ -975,6 +975,36 @@ def _video_quality_key(fmt: dict) -> tuple:
     return (height, fps, tbr, vbr)
 
 
+# Lingue proposte in ⚙️ Impostazioni; None = la lingua originale del video.
+AUDIO_LANGS = {"it": "🇮🇹 Italiano", "en": "🇬🇧 English", "es": "🇪🇸 Español", "fr": "🇫🇷 Français"}
+
+
+def _track_lang(fmt: dict) -> str:
+    return (fmt.get("language") or "").split("-")[0].lower()
+
+
+def _audio_rank(fmt: dict, audio_lang: Optional[str]) -> tuple:
+    wanted = 1 if audio_lang and _track_lang(fmt) == audio_lang else 0
+    return (wanted,) + _audio_quality_key(fmt)
+
+
+def _dub_lang_for(info: dict, audio_lang: Optional[str]) -> Optional[str]:
+    """La lingua da chiedere a yt-dlp, o None se basta l'originale.
+
+    None anche quando la lingua scelta è già quella originale o il video non ha quel doppiaggio:
+    così la cache resta una sola per tutti quelli che ricevono la stessa traccia.
+    """
+    if not audio_lang:
+        return None
+    tracks = [
+        f for f in info.get("formats") or []
+        if f.get("vcodec") == "none" and f.get("acodec") != "none" and _track_lang(f) == audio_lang
+    ]
+    if not tracks or any((f.get("language_preference") or 0) >= 10 for f in tracks):
+        return None
+    return audio_lang
+
+
 def _audio_quality_key(fmt: dict) -> tuple:
     # Con il doppiaggio automatico di YouTube ogni video ha più tracce audio, spesso con lo stesso
     # bitrate: la lingua originale (language_preference 10, i doppiaggi -1) deve vincere sulla qualità.
@@ -985,12 +1015,12 @@ def _audio_quality_key(fmt: dict) -> tuple:
     return (lang, abr, tbr, asr)
 
 
-def _select_video_format_under_limit(info: dict, limit_bytes: int) -> str:
+def _select_video_format_under_limit(info: dict, limit_bytes: int, audio_lang: Optional[str] = None) -> str:
     formats = info.get("formats") or []
     duration_s = info.get("duration")
     # Il download rifà l'estrazione e YouTube può rispondere con id diversi (es. 140-1 invece di 140,
     # sui video con più lingue audio): l'id scelto va sempre seguito da un'alternativa generica.
-    fallback = _fallback_video_format(limit_bytes)
+    fallback = _fallback_video_format(limit_bytes, audio_lang)
 
     progressive = [
         f
@@ -1007,7 +1037,8 @@ def _select_video_format_under_limit(info: dict, limit_bytes: int) -> str:
             and _format_size_or_estimate(f, duration_s) <= limit_bytes
         )
     ]
-    if progressive_ok:
+    # I formati con audio incorporato hanno solo la traccia originale.
+    if progressive_ok and not audio_lang:
         best = max(progressive_ok, key=_video_quality_key)
         return f"{best['format_id']}/{fallback}"
 
@@ -1027,7 +1058,7 @@ def _select_video_format_under_limit(info: dict, limit_bytes: int) -> str:
     ]
 
     video_only_sorted = sorted(video_only, key=_video_quality_key, reverse=True)
-    audio_only_sorted = sorted(audio_only, key=_audio_quality_key, reverse=True)
+    audio_only_sorted = sorted(audio_only, key=lambda f: _audio_rank(f, audio_lang), reverse=True)
 
     for v in video_only_sorted:
         vsize = _format_size_or_estimate(v, duration_s)
@@ -1050,7 +1081,7 @@ def _select_video_format_under_limit(info: dict, limit_bytes: int) -> str:
     return fallback
 
 
-def _fallback_video_format(limit_bytes: int) -> str:
+def _fallback_video_format(limit_bytes: int, audio_lang: Optional[str] = None) -> str:
     # Fallback conservativo: limita l'altezza per aumentare le chance di stare sotto il limite.
     limit_mb = limit_bytes / (1024 * 1024)
     if limit_mb <= 60:
@@ -1062,13 +1093,15 @@ def _fallback_video_format(limit_bytes: int) -> str:
     else:
         cap = 1080
 
+    # Senza filtro sulla lingua l'ordinamento di yt-dlp mette già l'audio originale per primo.
+    dubbed = f"bestvideo[ext=mp4][height<={cap}]+bestaudio[ext=m4a][language^={audio_lang}]/" if audio_lang else ""
     return (
-        f"bestvideo[ext=mp4][height<={cap}]+bestaudio[ext=m4a]/"
+        f"{dubbed}bestvideo[ext=mp4][height<={cap}]+bestaudio[ext=m4a]/"
         f"best[ext=mp4][height<={cap}]/best[height<={cap}]"
     )
 
 
-def _select_audio_format_under_limit(info: dict, limit_bytes: int) -> str:
+def _select_audio_format_under_limit(info: dict, limit_bytes: int, audio_lang: Optional[str] = None) -> str:
     formats = info.get("formats") or []
     duration_s = info.get("duration")
     audio_only = [
@@ -1087,9 +1120,13 @@ def _select_audio_format_under_limit(info: dict, limit_bytes: int) -> str:
         )
     ]
     if audio_ok:
-        best = max(audio_ok, key=_audio_quality_key)
-        return f"{best['format_id']}/bestaudio/best"
-    return "bestaudio/best"
+        best = max(audio_ok, key=lambda f: _audio_rank(f, audio_lang))
+        return f"{best['format_id']}/{_fallback_audio_format(audio_lang)}"
+    return _fallback_audio_format(audio_lang)
+
+
+def _fallback_audio_format(audio_lang: Optional[str]) -> str:
+    return f"bestaudio[language^={audio_lang}]/bestaudio/best" if audio_lang else "bestaudio/best"
 
 
 def _cleanup_partial_downloads(prefix: str) -> None:
@@ -1158,12 +1195,12 @@ def _latest_downloaded_path(prefix: str) -> str:
     return max(matches, key=lambda p: os.path.getmtime(p))
 
 
-def _download_video(url: str, yt_id: str) -> tuple[str, dict]:
+def _download_video(url: str, yt_id: str, audio_lang: Optional[str] = None) -> tuple[str, dict]:
     ydl_preview_opts = {"quiet": True, "noplaylist": True}
     with _ydl(ydl_preview_opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
-    fmt = _select_video_format_under_limit(info, EFFECTIVE_MAX_UPLOAD_BYTES)
+    fmt = _select_video_format_under_limit(info, EFFECTIVE_MAX_UPLOAD_BYTES, audio_lang)
     prefix = f"{yt_id}_video."
     _cleanup_partial_downloads(prefix)
     ydl_opts = {
@@ -1203,8 +1240,8 @@ def _download_video(url: str, yt_id: str) -> tuple[str, dict]:
     return path, info
 
 
-def _download_audio(url: str, yt_id: str, info: dict) -> str:
-    fmt = _select_audio_format_under_limit(info, EFFECTIVE_MAX_UPLOAD_BYTES)
+def _download_audio(url: str, yt_id: str, info: dict, audio_lang: Optional[str] = None) -> str:
+    fmt = _select_audio_format_under_limit(info, EFFECTIVE_MAX_UPLOAD_BYTES, audio_lang)
     prefix = f"{yt_id}_audio."
     _cleanup_partial_downloads(prefix)
     ydl_opts = {
@@ -1489,6 +1526,7 @@ def main_menu_keyboard(user_id: Optional[int] = None):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(types.KeyboardButton("➕ Nuova Iscrizione"), types.KeyboardButton("📥 Le mie Iscrizioni"))
     kb.add(types.KeyboardButton("📊 Report Statistiche"), types.KeyboardButton("📣 Broadcast"))
+    kb.add(types.KeyboardButton("⚙️ Impostazioni"))
     if user_id == ADMIN_USER_ID:
         kb.add(types.KeyboardButton("💼 Sponsor"))
     elif not _is_ad_free(user_id):
@@ -1519,6 +1557,51 @@ def handle_ad_free_offer(message: types.Message) -> None:
         reply_markup=kb,
         reply_to_message_id=_get_msg_id(message),
     )
+
+
+def _settings_view(user_id: int) -> tuple[str, types.InlineKeyboardMarkup]:
+    current = storage.get_audio_lang(DB_PATH, user_id)
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    choices = [("orig", "🌐 Originale")] + list(AUDIO_LANGS.items())
+    kb.add(*[
+        types.InlineKeyboardButton(
+            ("✅ " if (code == "orig" and current is None) or code == current else "") + label,
+            callback_data=f"cfg:lang:{code}",
+        )
+        for code, label in choices
+    ])
+    current_label = AUDIO_LANGS.get(current, "🌐 Originale") if current else "🌐 Originale"
+    text = (
+        "⚙️ Impostazioni\n\n"
+        f"🎧 Lingua dell'audio: {current_label}\n\n"
+        "Molti video YouTube hanno anche tracce doppiate. Se il video non ha la lingua scelta, "
+        "ricevi quella originale."
+    )
+    return text, kb
+
+
+@bot.message_handler(commands=["config", "impostazioni"])
+@bot.message_handler(func=lambda m: m.text == "⚙️ Impostazioni")
+def handle_settings(message: types.Message) -> None:
+    if not _ensure_authorized(message):
+        return
+    text, kb = _settings_view(message.from_user.id)
+    bot.send_message(message.chat.id, text, reply_markup=kb)
+
+
+@bot.callback_query_handler(func=lambda c: (c.data or "").startswith("cfg:"))
+def handle_settings_callbacks(call: types.CallbackQuery) -> None:
+    parts = (call.data or "").split(":")
+    if len(parts) == 3 and parts[1] == "lang" and (parts[2] == "orig" or parts[2] in AUDIO_LANGS):
+        storage.set_audio_lang(DB_PATH, call.from_user.id, None if parts[2] == "orig" else parts[2])
+        bot.answer_callback_query(call.id, "Salvato")
+        text, kb = _settings_view(call.from_user.id)
+        try:
+            bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=kb)
+        except Exception:
+            pass  # stessa scelta di prima: Telegram rifiuta un messaggio identico
+        return
+    bot.answer_callback_query(call.id)
 
 
 @bot.message_handler(func=lambda m: m.text == "🚫 Togli la pubblicità")
@@ -2082,7 +2165,10 @@ def _process_download(task: DownloadTask) -> None:
         except Exception:
             pass
 
-        cached = storage.get_cache(DB_PATH, yt_id)
+        dub_lang = _dub_lang_for(info_preview, storage.get_audio_lang(DB_PATH, message.from_user.id))
+        # Un doppiaggio è un file diverso: in cache non può prendere il posto dell'originale.
+        cache_key = f"{yt_id}@{dub_lang}" if dub_lang else yt_id
+        cached = storage.get_cache(DB_PATH, cache_key)
         
         msg_photo = None
         msg_video = None
@@ -2132,9 +2218,9 @@ def _process_download(task: DownloadTask) -> None:
             video_path = None
             audio_path = None
             if mode in ["V", "B"]:
-                video_path, info = _download_video(url, yt_id)
+                video_path, info = _download_video(url, yt_id, dub_lang)
             if mode in ["A", "B"]:
-                audio_path = _download_audio(url, yt_id, info if 'info' in locals() else info_preview)
+                audio_path = _download_audio(url, yt_id, info if 'info' in locals() else info_preview, dub_lang)
                 
             meta = info if 'info' in locals() else info_preview
             thumb_url = meta.get("thumbnail")
@@ -2191,7 +2277,7 @@ def _process_download(task: DownloadTask) -> None:
             if mode == "B" and msg_photo and msg_video and msg_audio:
                 storage.upsert_cache(
                     DB_PATH,
-                    yt_id,
+                    cache_key,
                     title=title,
                     thumb_file_id=_file_id_from_result(msg_photo, "photo"),
                     video_file_id=_file_id_from_result(msg_video, "video") or _file_id_from_result(msg_video, "document"),

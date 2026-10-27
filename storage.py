@@ -101,6 +101,14 @@ def init_db(db_path: str) -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS user_settings (
+                user_id INTEGER PRIMARY KEY,
+                audio_lang TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS subscriptions (
                 user_id INTEGER NOT NULL,
                 channel_url TEXT NOT NULL,
@@ -451,6 +459,24 @@ def clear_sponsors(db_path: str) -> int:
     with _connect(db_path) as conn:
         cur = conn.execute("DELETE FROM sponsors")
         return int(cur.rowcount or 0)
+
+
+def get_audio_lang(db_path: str, user_id: int) -> Optional[str]:
+    """None = lingua originale del video."""
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT audio_lang FROM user_settings WHERE user_id=?", (user_id,)).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def set_audio_lang(db_path: str, user_id: int, audio_lang: Optional[str]) -> None:
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO user_settings (user_id, audio_lang) VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET audio_lang=excluded.audio_lang
+            """,
+            (user_id, audio_lang),
+        )
 
 
 def get_cache(db_path: str, yt_id: str) -> Optional[CacheEntry]:
