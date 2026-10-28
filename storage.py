@@ -109,6 +109,17 @@ def init_db(db_path: str) -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS chat_settings (
+                chat_id INTEGER PRIMARY KEY,
+                sticker INTEGER NOT NULL,
+                thumb INTEGER NOT NULL,
+                video INTEGER NOT NULL,
+                audio INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS subscriptions (
                 user_id INTEGER NOT NULL,
                 channel_url TEXT NOT NULL,
@@ -479,6 +490,35 @@ def set_audio_lang(db_path: str, user_id: int, audio_lang: Optional[str]) -> Non
         )
 
 
+# In un gruppo di default arrivano solo i contenuti: sticker e anteprima si accendono a richiesta.
+CHAT_MEDIA_DEFAULTS = {"sticker": False, "thumb": False, "video": True, "audio": True}
+
+
+def get_chat_settings(db_path: str, chat_id: int) -> dict[str, bool]:
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT sticker, thumb, video, audio FROM chat_settings WHERE chat_id=?", (chat_id,)
+        ).fetchone()
+    if not row:
+        return dict(CHAT_MEDIA_DEFAULTS)
+    return dict(zip(CHAT_MEDIA_DEFAULTS, map(bool, row)))
+
+
+def toggle_chat_setting(db_path: str, chat_id: int, key: str) -> dict[str, bool]:
+    settings = get_chat_settings(db_path, chat_id)
+    settings[key] = not settings[key]
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO chat_settings (chat_id, sticker, thumb, video, audio) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                sticker=excluded.sticker, thumb=excluded.thumb, video=excluded.video, audio=excluded.audio
+            """,
+            (chat_id, *(int(settings[k]) for k in CHAT_MEDIA_DEFAULTS)),
+        )
+    return settings
+
+
 def get_cache(db_path: str, yt_id: str) -> Optional[CacheEntry]:
     with _connect(db_path) as conn:
         row = conn.execute(
@@ -516,7 +556,8 @@ def upsert_cache(
             VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(yt_id) DO UPDATE SET
                 title=excluded.title,
-                thumb_file_id=excluded.thumb_file_id,
+                -- Un invio senza anteprima (gruppi) non cancella quella già salvata.
+                thumb_file_id=COALESCE(NULLIF(excluded.thumb_file_id, ''), cache.thumb_file_id),
                 video_file_id=excluded.video_file_id,
                 audio_file_id=excluded.audio_file_id,
                 updated_at=excluded.updated_at,

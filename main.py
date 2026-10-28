@@ -1604,9 +1604,44 @@ def _settings_view(user_id: int) -> tuple[str, types.InlineKeyboardMarkup]:
     return text, kb
 
 
+CHAT_MEDIA_LABELS = {"sticker": "🏷 Sticker", "thumb": "🖼 Anteprima", "video": "🎬 Video", "audio": "🎵 Audio"}
+
+
+def _chat_settings_view(chat_id: int) -> tuple[str, types.InlineKeyboardMarkup]:
+    show = storage.get_chat_settings(DB_PATH, chat_id)
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(*[
+        types.InlineKeyboardButton(("✅ " if show[key] else "❌ ") + label, callback_data=f"gcfg:{key}")
+        for key, label in CHAT_MEDIA_LABELS.items()
+    ])
+    text = (
+        "⚙️ Impostazioni del gruppo\n\n"
+        "Cosa invio quando qui viene pubblicato un link. Tocca per accendere o spegnere: "
+        "possono cambiarlo solo gli amministratori."
+    )
+    return text, kb
+
+
+def _is_chat_admin(chat_id: int, user_id: int) -> bool:
+    if user_id == ADMIN_USER_ID:
+        return True
+    try:
+        return bot.get_chat_member(chat_id, user_id).status in ("creator", "administrator")
+    except Exception:
+        return False
+
+
 @bot.message_handler(commands=["config", "impostazioni"])
 @bot.message_handler(func=lambda m: m.text == "⚙️ Impostazioni")
+@bot.channel_post_handler(commands=["config", "impostazioni"])
 def handle_settings(message: types.Message) -> None:
+    if message.chat.type != "private":
+        # In un canale, o da admin anonimo, scrive la chat stessa: solo chi la amministra può farlo.
+        by_chat = message.sender_chat is not None and message.sender_chat.id == message.chat.id
+        if by_chat or (message.from_user and _is_chat_admin(message.chat.id, message.from_user.id)):
+            text, kb = _chat_settings_view(message.chat.id)
+            bot.send_message(message.chat.id, text, reply_markup=kb)
+        return
     if not _ensure_authorized(message):
         return
     text, kb = _settings_view(message.from_user.id)
@@ -1626,6 +1661,25 @@ def handle_settings_callbacks(call: types.CallbackQuery) -> None:
             pass  # stessa scelta di prima: Telegram rifiuta un messaggio identico
         return
     bot.answer_callback_query(call.id)
+
+
+@bot.callback_query_handler(func=lambda c: (c.data or "").startswith("gcfg:"))
+def handle_chat_settings_callbacks(call: types.CallbackQuery) -> None:
+    key = (call.data or "").split(":", 1)[1]
+    chat_id = call.message.chat.id
+    if key not in CHAT_MEDIA_LABELS:
+        bot.answer_callback_query(call.id)
+        return
+    if not _is_chat_admin(chat_id, call.from_user.id):
+        bot.answer_callback_query(call.id, "Solo gli amministratori possono cambiarlo.")
+        return
+    storage.toggle_chat_setting(DB_PATH, chat_id, key)
+    bot.answer_callback_query(call.id, "Salvato")
+    text, kb = _chat_settings_view(chat_id)
+    try:
+        bot.edit_message_text(text, chat_id, call.message.message_id, reply_markup=kb)
+    except Exception:
+        pass
 
 
 @bot.message_handler(func=lambda m: m.text == "🚫 Togli la pubblicità")
@@ -2098,7 +2152,14 @@ def _has_full_cache(url: str, user_id: int) -> bool:
     # Con una lingua scelta si cerca solo il doppiaggio: l'originale da solo potrebbe non essere quello voluto.
     audio_lang = storage.get_audio_lang(DB_PATH, user_id)
     cached = storage.get_cache(DB_PATH, f"{yt_id}@{audio_lang}" if audio_lang else yt_id)
-    return bool(cached and cached.get("thumb_file_id") and cached.get("video_file_id") and cached.get("audio_file_id"))
+    return bool(cached and cached.get("video_file_id") and cached.get("audio_file_id"))
+
+
+def _group_mode(chat_id: int) -> Optional[str]:
+    show = storage.get_chat_settings(DB_PATH, chat_id)
+    if show["video"] and show["audio"]:
+        return "B"
+    return "V" if show["video"] else "A" if show["audio"] else None
 
 
 @bot.channel_post_handler(
@@ -2106,7 +2167,9 @@ def _has_full_cache(url: str, user_id: int) -> bool:
     func=lambda m: _link_for(m) is not None,
 )
 def handle_channel_download(message: types.Message) -> None:
-    download_queue.put(DownloadTask(message, _link_for(message), "B"))
+    mode = _group_mode(message.chat.id)
+    if mode:
+        download_queue.put(DownloadTask(message, _link_for(message), mode))
 
 
 @bot.message_handler(
@@ -2120,7 +2183,9 @@ def handle_download(message: types.Message) -> None:
     url = _link_for(message)
     # Nei gruppi si scarica tutto senza chiedere: chi pubblica un link lo vuole lì, non in privato.
     if message.chat.type != "private":
-        download_queue.put(DownloadTask(message, url, "B"))
+        mode = _group_mode(message.chat.id)
+        if mode:
+            download_queue.put(DownloadTask(message, url, mode))
         return
     # Già in archivio: si rimanda tutto subito, senza chiedere il formato né aspettare la coda.
     if _has_full_cache(url, message.from_user.id):
@@ -2184,8 +2249,8 @@ def _process_download(task: DownloadTask) -> None:
     lock = None
     uid, who = _requester(message)
     # Gruppi e canali li leggono tutti: lì arrivano solo i contenuti, niente messaggi di servizio.
-    in_channel = message.chat.type == "channel"
     in_group = message.chat.type != "private"
+    show = storage.get_chat_settings(DB_PATH, message.chat.id) if in_group else dict.fromkeys(storage.CHAT_MEDIA_DEFAULTS, True)
 
     try:
         msg_id = _get_msg_id(message)
@@ -2225,7 +2290,7 @@ def _process_download(task: DownloadTask) -> None:
             sticker_set = bot.get_sticker_set("BitcoinPodcast")
             if sticker_set.stickers:
                 sticker_file_id = sticker_set.stickers[0].file_id
-                if not in_channel:
+                if show["sticker"]:
                     bot.send_sticker(message.chat.id, sticker_file_id)
         except Exception:
             pass
@@ -2238,21 +2303,26 @@ def _process_download(task: DownloadTask) -> None:
         msg_photo = None
         msg_video = None
         msg_audio = None
+        # Senza anteprima il titolo resterebbe solo nel nome del file: va nella didascalia.
+        video_label = "🎬 Video" if show["thumb"] else f"🎬 {title}"
+        audio_label = "🎵 Audio" if show["thumb"] else f"🎵 {title}"
+        cache_tag = "" if in_group else " (cache)"
 
-        if cached and cached.get("thumb_file_id") and cached.get("video_file_id") and cached.get("audio_file_id"):
-            msg_photo = bot.send_photo(
-                message.chat.id,
-                cached["thumb_file_id"],
-                caption=_media_caption(f"📸 {title}", for_chat=message.chat.id, source_url=source_url),
-                parse_mode="HTML",
-            )
+        if cached and cached.get("video_file_id") and cached.get("audio_file_id"):
+            if show["thumb"] and cached.get("thumb_file_id"):
+                msg_photo = bot.send_photo(
+                    message.chat.id,
+                    cached["thumb_file_id"],
+                    caption=_media_caption(f"📸 {title}", for_chat=message.chat.id, source_url=source_url),
+                    parse_mode="HTML",
+                )
             if mode in ["V", "B"]:
                 try:
                     msg_video = _send_with_retry(
                         bot.send_video,
                         message.chat.id,
                         cached["video_file_id"],
-                        caption=_media_caption("🎬 Video (cache)", for_chat=message.chat.id, source_url=source_url),
+                        caption=_media_caption(video_label + cache_tag, for_chat=message.chat.id, source_url=source_url),
                         parse_mode="HTML",
                     )
                 except Exception:
@@ -2260,7 +2330,7 @@ def _process_download(task: DownloadTask) -> None:
                         bot.send_document,
                         message.chat.id,
                         cached["video_file_id"],
-                        caption=_media_caption("🎬 Video (cache)", for_chat=message.chat.id, source_url=source_url),
+                        caption=_media_caption(video_label + cache_tag, for_chat=message.chat.id, source_url=source_url),
                         parse_mode="HTML",
                     )
             if mode in ["A", "B"]:
@@ -2268,7 +2338,7 @@ def _process_download(task: DownloadTask) -> None:
                     bot.send_audio,
                     message.chat.id,
                     cached["audio_file_id"],
-                    caption=_media_caption("🎵 Audio (cache)", for_chat=message.chat.id, source_url=source_url),
+                    caption=_media_caption(audio_label + cache_tag, for_chat=message.chat.id, source_url=source_url),
                     parse_mode="HTML",
                 )
             
@@ -2301,19 +2371,20 @@ def _process_download(task: DownloadTask) -> None:
                 if path:
                     _tag_media(path, title=title, performer=performer or "", source_url=url)
 
-            try:
-                thumb_result = _send_thumbnail(message.chat.id, thumb_url, f"📸 {title}", yt_id, title, source_url=source_url)
-                if isinstance(thumb_result, tuple):
-                    msg_photo, thumb_path = thumb_result
-                else:
-                    msg_photo = thumb_result
-            except Exception as e:
-                print(f"Invio thumbnail fallito: {e}")
+            if show["thumb"]:
+                try:
+                    thumb_result = _send_thumbnail(message.chat.id, thumb_url, f"📸 {title}", yt_id, title, source_url=source_url)
+                    if isinstance(thumb_result, tuple):
+                        msg_photo, thumb_path = thumb_result
+                    else:
+                        msg_photo = thumb_result
+                except Exception as e:
+                    print(f"Invio thumbnail fallito: {e}")
 
             if video_path and mode in ["V", "B"]:
                 try:
                     msg_video = _send_video_or_document(
-                        message.chat.id, video_path, "🎬 Video",
+                        message.chat.id, video_path, video_label,
                         title=title,
                         thumb_path=small_thumb,
                         duration=duration,
@@ -2328,7 +2399,7 @@ def _process_download(task: DownloadTask) -> None:
             if audio_path and mode in ["A", "B"]:
                 try:
                     msg_audio = _send_audio(
-                        message.chat.id, audio_path, "🎵 Audio", title,
+                        message.chat.id, audio_path, audio_label, title,
                         thumb_path=small_thumb,
                         duration=duration,
                         performer=performer,
@@ -2339,12 +2410,12 @@ def _process_download(task: DownloadTask) -> None:
                     print(f"Invio audio fallito (size={asz}): {e}")
 
             # update cache only if we downloaded BOTH
-            if mode == "B" and msg_photo and msg_video and msg_audio:
+            if mode == "B" and msg_video and msg_audio:
                 storage.upsert_cache(
                     DB_PATH,
                     cache_key,
                     title=title,
-                    thumb_file_id=_file_id_from_result(msg_photo, "photo"),
+                    thumb_file_id=_file_id_from_result(msg_photo, "photo") if msg_photo else "",
                     video_file_id=_file_id_from_result(msg_video, "video") or _file_id_from_result(msg_video, "document"),
                     audio_file_id=_file_id_from_result(msg_audio, "audio"),
                 )
