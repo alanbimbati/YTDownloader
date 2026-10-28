@@ -389,7 +389,7 @@ def _propose_channel_publication(message: types.Message, title: str, terms: list
         ADMIN_USER_ID,
         f"₿ Video a tema bitcoin: «{title}»\n"
         f"Termini trovati: {', '.join(terms)}\n"
-        f"Richiesto da: {_user_label(message.from_user)}\n\n"
+        f"Richiesto da: {_requester(message)[1]}\n\n"
         f"Lo pubblico su {BITCOIN_CHANNEL}?",
         reply_markup=kb,
     )
@@ -448,6 +448,13 @@ def _user_label(user: Any) -> str:
     if first_name:
         return f"{first_name} (id {user.id})"
     return f"id {user.id}"
+
+
+def _requester(message: types.Message) -> tuple[int, str]:
+    # I post di un canale non hanno un utente: chi chiede è il canale stesso.
+    if message.from_user:
+        return message.from_user.id, _user_label(message.from_user)
+    return message.chat.id, f"canale {message.chat.title or message.chat.id}"
 
 
 def _ensure_authorized(message: types.Message) -> bool:
@@ -2056,6 +2063,69 @@ for _ in range(2):
     t.start()
 
 
+def _url_temp_id(url: str) -> Optional[str]:
+    # L'id si ricava dal solo link, senza chiamare il sito: basta a capire se è già in archivio.
+    for ie in yt_dlp.extractor.gen_extractor_classes():
+        if ie.ie_key() != "Generic" and ie.suitable(url):
+            try:
+                return ie.get_temp_id(url)
+            except Exception:
+                return None
+    return None
+
+
+def _has_full_cache(url: str, user_id: int) -> bool:
+    yt_id = _url_temp_id(url)
+    if not yt_id:
+        return False
+    # Con una lingua scelta si cerca solo il doppiaggio: l'originale da solo potrebbe non essere quello voluto.
+    audio_lang = storage.get_audio_lang(DB_PATH, user_id)
+    cached = storage.get_cache(DB_PATH, f"{yt_id}@{audio_lang}" if audio_lang else yt_id)
+    return bool(cached and cached.get("thumb_file_id") and cached.get("video_file_id") and cached.get("audio_file_id"))
+
+
+def _may_toggle_auto(message: types.Message) -> bool:
+    if message.from_user and message.from_user.id == ADMIN_USER_ID:
+        return True
+    # Nei canali (e per gli admin anonimi di un gruppo) il mittente è la chat stessa:
+    # vale solo se l'admin del bot la amministra, così nessun altro accende i download a suo nome.
+    if message.sender_chat and message.sender_chat.id == message.chat.id:
+        try:
+            return any(a.user.id == ADMIN_USER_ID for a in bot.get_chat_administrators(message.chat.id))
+        except Exception:
+            return False
+    return False
+
+
+@bot.message_handler(commands=["auto"])
+@bot.channel_post_handler(commands=["auto"])
+def handle_auto_toggle(message: types.Message) -> None:
+    if message.chat.type == "private":
+        bot.reply_to(message, "Scrivi /auto dentro il gruppo o il canale in cui vuoi il download automatico.")
+        return
+    if not _may_toggle_auto(message):
+        return
+    on = storage.toggle_auto_chat(DB_PATH, message.chat.id, message.chat.title or "")
+    bot.send_message(
+        message.chat.id,
+        "✅ Download automatico attivo: scarico subito ogni link pubblicato qui." if on
+        else "⏸️ Download automatico disattivato.",
+    )
+    if message.chat.type == "channel":
+        try:
+            bot.delete_message(message.chat.id, message.message_id)
+        except Exception:
+            pass
+
+
+@bot.channel_post_handler(
+    content_types=["text", "photo", "video", "animation", "document"],
+    func=lambda m: _message_url(m) is not None and storage.is_auto_chat(DB_PATH, m.chat.id),
+)
+def handle_channel_download(message: types.Message) -> None:
+    download_queue.put(DownloadTask(message, _message_url(message), "B"))
+
+
 @bot.message_handler(
     content_types=["text", "photo", "video", "animation", "document"],
     func=lambda m: _message_url(m) is not None,
@@ -2064,15 +2134,20 @@ def handle_download(message: types.Message) -> None:
     if not _ensure_authorized(message):
         return
 
+    url = _message_url(message)
+    if storage.is_auto_chat(DB_PATH, message.chat.id):
+        download_queue.put(DownloadTask(message, url, "B"))
+        return
+    # Già in archivio: si rimanda tutto subito, senza chiedere il formato né aspettare la coda.
+    if _has_full_cache(url, message.from_user.id):
+        threading.Thread(target=_process_download, args=(DownloadTask(message, url, "B"),), daemon=True).start()
+        return
+
     if message.from_user.id != ADMIN_USER_ID:
         count = storage.get_downloads_last_hour(DB_PATH, message.from_user.id)
         if count >= 3:
             bot.reply_to(message, _append_sponsor("Hai raggiunto il limite di 3 download all'ora. Riprova più tardi.", limit=TEXT_LIMIT, for_chat=message.chat.id))
             return
-
-    url = _message_url(message)
-    if not url:
-        return
 
     # Invia scelte via InlineKeyboardMarkup
     url_id = storage.save_url_cache(DB_PATH, url)
@@ -2123,14 +2198,18 @@ def _process_download(task: DownloadTask) -> None:
     audio_path = None
     thumb_path = None
     lock = None
+    uid, who = _requester(message)
+    # In un canale lo leggono tutti gli iscritti: lì arrivano solo i contenuti, niente messaggi di servizio.
+    in_channel = message.chat.type == "channel"
 
     try:
         msg_id = _get_msg_id(message)
-        status = bot.send_message(
-            message.chat.id, 
-            _append_sponsor("⏳ Sto preparando download e invio…", limit=TEXT_LIMIT, for_chat=message.chat.id),
-            reply_to_message_id=msg_id if msg_id and msg_id > 0 else None
-        )
+        if not in_channel:
+            status = bot.send_message(
+                message.chat.id,
+                _append_sponsor("⏳ Sto preparando download e invio…", limit=TEXT_LIMIT, for_chat=message.chat.id),
+                reply_to_message_id=msg_id if msg_id and msg_id > 0 else None
+            )
 
         preview_opts = {"quiet": True, "noplaylist": True}
         with _ydl(preview_opts) as ydl:
@@ -2152,7 +2231,7 @@ def _process_download(task: DownloadTask) -> None:
         lock = _video_lock(yt_id)
         lock.acquire()
         # Lo stesso canale può arrivare da due iscrizioni (handle e link di un video): una volta basta.
-        if task.from_subscription and storage.has_downloaded(DB_PATH, message.from_user.id, yt_id):
+        if task.from_subscription and storage.has_downloaded(DB_PATH, uid, yt_id):
             return
 
         # Send the sticker to the user
@@ -2161,11 +2240,12 @@ def _process_download(task: DownloadTask) -> None:
             sticker_set = bot.get_sticker_set("BitcoinPodcast")
             if sticker_set.stickers:
                 sticker_file_id = sticker_set.stickers[0].file_id
-                bot.send_sticker(message.chat.id, sticker_file_id)
+                if not in_channel:
+                    bot.send_sticker(message.chat.id, sticker_file_id)
         except Exception:
             pass
 
-        dub_lang = _dub_lang_for(info_preview, storage.get_audio_lang(DB_PATH, message.from_user.id))
+        dub_lang = _dub_lang_for(info_preview, storage.get_audio_lang(DB_PATH, uid))
         # Un doppiaggio è un file diverso: in cache non può prendere il posto dell'originale.
         cache_key = f"{yt_id}@{dub_lang}" if dub_lang else yt_id
         cached = storage.get_cache(DB_PATH, cache_key)
@@ -2207,11 +2287,11 @@ def _process_download(task: DownloadTask) -> None:
                     parse_mode="HTML",
                 )
             
-            storage.log_download(DB_PATH, message.from_user.id, yt_id, yt_title=title)
-            if message.from_user.id != ADMIN_USER_ID:
+            storage.log_download(DB_PATH, uid, yt_id, yt_title=title)
+            if uid != ADMIN_USER_ID:
                 bot.send_message(
                     ADMIN_USER_ID,
-                    f"📥 L'utente {_user_label(message.from_user)} ha scaricato (da cache): {url}"
+                    f"📥 L'utente {who} ha scaricato (da cache): {url}"
                 )
             
         else:
@@ -2284,11 +2364,11 @@ def _process_download(task: DownloadTask) -> None:
                     audio_file_id=_file_id_from_result(msg_audio, "audio"),
                 )
             
-            storage.log_download(DB_PATH, message.from_user.id, yt_id, yt_title=title)
-            if message.from_user.id != ADMIN_USER_ID:
+            storage.log_download(DB_PATH, uid, yt_id, yt_title=title)
+            if uid != ADMIN_USER_ID:
                 bot.send_message(
                     ADMIN_USER_ID,
-                    f"📥 L'utente {_user_label(message.from_user)} ha scaricato un nuovo video: {url}"
+                    f"📥 L'utente {who} ha scaricato un nuovo video: {url}"
                 )
                 
         sent_ids = []
@@ -2308,7 +2388,7 @@ def _process_download(task: DownloadTask) -> None:
                 # Tutto il resto sul canale ci va solo se lo approvi.
                 terms = _bitcoin_terms_in(info if "info" in locals() else info_preview)
                 if terms:
-                    if message.from_user.id == ADMIN_USER_ID:
+                    if uid == ADMIN_USER_ID:
                         # L'admin è chi approverebbe: chiederglielo sarebbe solo un passaggio in più.
                         _publish_to_channel(message.chat.id, sent_ids, sticker_file_id)
                     else:
@@ -2323,11 +2403,14 @@ def _process_download(task: DownloadTask) -> None:
         if "confirm you" in str(e) and "not a bot" in str(e):
             _alert_bot_check()
             text = "YouTube sta bloccando i download dal server (verifica anti-bot). L'amministratore è avvisato: riprova più tardi."
-        bot.send_message(
-            message.chat.id,
-            _append_sponsor(text, limit=TEXT_LIMIT, for_chat=message.chat.id),
-            reply_to_message_id=msg_id if msg_id and msg_id > 0 else None
-        )
+        if in_channel:
+            bot.send_message(ADMIN_USER_ID, f"❌ Download automatico in {who} fallito: {url}\n{text}")
+        else:
+            bot.send_message(
+                message.chat.id,
+                _append_sponsor(text, limit=TEXT_LIMIT, for_chat=message.chat.id),
+                reply_to_message_id=msg_id if msg_id and msg_id > 0 else None
+            )
     finally:
         for p in (video_path, audio_path, thumb_path):
             if p and os.path.exists(p):
