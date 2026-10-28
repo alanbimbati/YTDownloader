@@ -109,15 +109,6 @@ def init_db(db_path: str) -> None:
         )
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS auto_chats (
-                chat_id INTEGER PRIMARY KEY,
-                title TEXT,
-                added_at INTEGER NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            """
             CREATE TABLE IF NOT EXISTS subscriptions (
                 user_id INTEGER NOT NULL,
                 channel_url TEXT NOT NULL,
@@ -486,23 +477,6 @@ def set_audio_lang(db_path: str, user_id: int, audio_lang: Optional[str]) -> Non
             """,
             (user_id, audio_lang),
         )
-
-
-def is_auto_chat(db_path: str, chat_id: int) -> bool:
-    with _connect(db_path) as conn:
-        return conn.execute("SELECT 1 FROM auto_chats WHERE chat_id=?", (chat_id,)).fetchone() is not None
-
-
-def toggle_auto_chat(db_path: str, chat_id: int, title: str = "") -> bool:
-    """Ritorna lo stato nuovo: True = download automatico attivo."""
-    with _connect(db_path) as conn:
-        if conn.execute("DELETE FROM auto_chats WHERE chat_id=?", (chat_id,)).rowcount:
-            return False
-        conn.execute(
-            "INSERT INTO auto_chats (chat_id, title, added_at) VALUES (?, ?, ?)",
-            (chat_id, title, int(time.time())),
-        )
-        return True
 
 
 def get_cache(db_path: str, yt_id: str) -> Optional[CacheEntry]:

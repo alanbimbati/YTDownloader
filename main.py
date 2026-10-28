@@ -2084,43 +2084,9 @@ def _has_full_cache(url: str, user_id: int) -> bool:
     return bool(cached and cached.get("thumb_file_id") and cached.get("video_file_id") and cached.get("audio_file_id"))
 
 
-def _may_toggle_auto(message: types.Message) -> bool:
-    if message.from_user and message.from_user.id == ADMIN_USER_ID:
-        return True
-    # Nei canali (e per gli admin anonimi di un gruppo) il mittente è la chat stessa:
-    # vale solo se l'admin del bot la amministra, così nessun altro accende i download a suo nome.
-    if message.sender_chat and message.sender_chat.id == message.chat.id:
-        try:
-            return any(a.user.id == ADMIN_USER_ID for a in bot.get_chat_administrators(message.chat.id))
-        except Exception:
-            return False
-    return False
-
-
-@bot.message_handler(commands=["auto"])
-@bot.channel_post_handler(commands=["auto"])
-def handle_auto_toggle(message: types.Message) -> None:
-    if message.chat.type == "private":
-        bot.reply_to(message, "Scrivi /auto dentro il gruppo o il canale in cui vuoi il download automatico.")
-        return
-    if not _may_toggle_auto(message):
-        return
-    on = storage.toggle_auto_chat(DB_PATH, message.chat.id, message.chat.title or "")
-    bot.send_message(
-        message.chat.id,
-        "✅ Download automatico attivo: scarico subito ogni link pubblicato qui." if on
-        else "⏸️ Download automatico disattivato.",
-    )
-    if message.chat.type == "channel":
-        try:
-            bot.delete_message(message.chat.id, message.message_id)
-        except Exception:
-            pass
-
-
 @bot.channel_post_handler(
     content_types=["text", "photo", "video", "animation", "document"],
-    func=lambda m: _message_url(m) is not None and storage.is_auto_chat(DB_PATH, m.chat.id),
+    func=lambda m: _message_url(m) is not None,
 )
 def handle_channel_download(message: types.Message) -> None:
     download_queue.put(DownloadTask(message, _message_url(message), "B"))
@@ -2135,7 +2101,8 @@ def handle_download(message: types.Message) -> None:
         return
 
     url = _message_url(message)
-    if storage.is_auto_chat(DB_PATH, message.chat.id):
+    # Nei gruppi si scarica tutto senza chiedere: chi pubblica un link lo vuole lì, non in privato.
+    if message.chat.type != "private":
         download_queue.put(DownloadTask(message, url, "B"))
         return
     # Già in archivio: si rimanda tutto subito, senza chiedere il formato né aspettare la coda.
@@ -2201,6 +2168,8 @@ def _process_download(task: DownloadTask) -> None:
     uid, who = _requester(message)
     # In un canale lo leggono tutti gli iscritti: lì arrivano solo i contenuti, niente messaggi di servizio.
     in_channel = message.chat.type == "channel"
+    # Un errore in un gruppo disturba tutti: lo vede solo l'admin.
+    in_group = message.chat.type != "private"
 
     try:
         msg_id = _get_msg_id(message)
@@ -2403,8 +2372,8 @@ def _process_download(task: DownloadTask) -> None:
         if "confirm you" in str(e) and "not a bot" in str(e):
             _alert_bot_check()
             text = "YouTube sta bloccando i download dal server (verifica anti-bot). L'amministratore è avvisato: riprova più tardi."
-        if in_channel:
-            bot.send_message(ADMIN_USER_ID, f"❌ Download automatico in {who} fallito: {url}\n{text}")
+        if in_group:
+            bot.send_message(ADMIN_USER_ID, f"❌ Download in {message.chat.title or message.chat.id} ({who}) fallito: {url}\n{text}")
         else:
             bot.send_message(
                 message.chat.id,
