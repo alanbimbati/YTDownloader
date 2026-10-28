@@ -440,6 +440,23 @@ def _message_url(message: types.Message) -> Optional[str]:
     return None
 
 
+def _link_for(message: types.Message) -> Optional[str]:
+    if message.chat.type == "private":
+        return _message_url(message)
+    # Nei gruppi si prova qualunque link: yt-dlp riconosce molti più siti di quelli elencati,
+    # e un link che non è un video fallisce in silenzio.
+    text = message.text or message.caption or ""
+    if text.startswith("/"):
+        return None
+    for raw in _URL_RE.findall(text):
+        candidate = raw.strip().rstrip(".,;:!?)]}>»\"'")
+        return candidate if candidate.lower().startswith("http") else f"https://{candidate}"
+    for ent in list(message.entities or []) + list(message.caption_entities or []):
+        if getattr(ent, "url", ""):
+            return ent.url
+    return None
+
+
 def _user_label(user: Any) -> str:
     username = getattr(user, "username", "") or ""
     first_name = getattr(user, "first_name", "") or ""
@@ -2086,21 +2103,21 @@ def _has_full_cache(url: str, user_id: int) -> bool:
 
 @bot.channel_post_handler(
     content_types=["text", "photo", "video", "animation", "document"],
-    func=lambda m: _message_url(m) is not None,
+    func=lambda m: _link_for(m) is not None,
 )
 def handle_channel_download(message: types.Message) -> None:
-    download_queue.put(DownloadTask(message, _message_url(message), "B"))
+    download_queue.put(DownloadTask(message, _link_for(message), "B"))
 
 
 @bot.message_handler(
     content_types=["text", "photo", "video", "animation", "document"],
-    func=lambda m: _message_url(m) is not None,
+    func=lambda m: _link_for(m) is not None,
 )
 def handle_download(message: types.Message) -> None:
     if not _ensure_authorized(message):
         return
 
-    url = _message_url(message)
+    url = _link_for(message)
     # Nei gruppi si scarica tutto senza chiedere: chi pubblica un link lo vuole lì, non in privato.
     if message.chat.type != "private":
         download_queue.put(DownloadTask(message, url, "B"))
@@ -2166,14 +2183,13 @@ def _process_download(task: DownloadTask) -> None:
     thumb_path = None
     lock = None
     uid, who = _requester(message)
-    # In un canale lo leggono tutti gli iscritti: lì arrivano solo i contenuti, niente messaggi di servizio.
+    # Gruppi e canali li leggono tutti: lì arrivano solo i contenuti, niente messaggi di servizio.
     in_channel = message.chat.type == "channel"
-    # Un errore in un gruppo disturba tutti: lo vede solo l'admin.
     in_group = message.chat.type != "private"
 
     try:
         msg_id = _get_msg_id(message)
-        if not in_channel:
+        if not in_group:
             status = bot.send_message(
                 message.chat.id,
                 _append_sponsor("⏳ Sto preparando download e invio…", limit=TEXT_LIMIT, for_chat=message.chat.id),
@@ -2373,7 +2389,8 @@ def _process_download(task: DownloadTask) -> None:
             _alert_bot_check()
             text = "YouTube sta bloccando i download dal server (verifica anti-bot). L'amministratore è avvisato: riprova più tardi."
         if in_group:
-            bot.send_message(ADMIN_USER_ID, f"❌ Download in {message.chat.title or message.chat.id} ({who}) fallito: {url}\n{text}")
+            # Nei gruppi passano anche link che non sono video: fallire lì è normale, non un errore da segnalare.
+            print(f"Download in {message.chat.title or message.chat.id} non riuscito: {url}: {e}")
         else:
             bot.send_message(
                 message.chat.id,
