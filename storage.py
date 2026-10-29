@@ -473,7 +473,7 @@ def clear_sponsors(db_path: str) -> int:
 
 
 def get_audio_lang(db_path: str, user_id: int) -> Optional[str]:
-    """None = lingua originale del video."""
+    """None = the video's original language."""
     with _connect(db_path) as conn:
         row = conn.execute("SELECT audio_lang FROM user_settings WHERE user_id=?", (user_id,)).fetchone()
     return row[0] if row and row[0] else None
@@ -490,7 +490,7 @@ def set_audio_lang(db_path: str, user_id: int, audio_lang: Optional[str]) -> Non
         )
 
 
-# In un gruppo di default arrivano solo i contenuti: sticker e anteprima si accendono a richiesta.
+# By default a group gets only the content: sticker and preview are turned on on request.
 CHAT_MEDIA_DEFAULTS = {"sticker": False, "thumb": False, "video": True, "audio": True}
 
 
@@ -556,7 +556,7 @@ def upsert_cache(
             VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(yt_id) DO UPDATE SET
                 title=excluded.title,
-                -- Un invio senza anteprima (gruppi) non cancella quella già salvata.
+                -- A send without preview (groups) does not wipe the one already stored.
                 thumb_file_id=COALESCE(NULLIF(excluded.thumb_file_id, ''), cache.thumb_file_id),
                 video_file_id=excluded.video_file_id,
                 audio_file_id=excluded.audio_file_id,

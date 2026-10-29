@@ -34,14 +34,14 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 
 def _ydl(opts: dict) -> yt_dlp.YoutubeDL:
-    # Riletto a ogni chiamata: i cookie scadono e si sostituiscono senza riavviare il bot.
+    # Read on every call: cookies expire and get replaced without restarting the bot.
     if COOKIES_FILE and os.path.isfile(COOKIES_FILE):
         opts = {**opts, "cookiefile": COOKIES_FILE}
     return yt_dlp.YoutubeDL(opts)
 
 
-# Due worker possono ricevere lo stesso video (iscritti allo stesso canale, link inviato due volte):
-# scriverebbero sugli stessi file e la pulizia dell'uno cancellerebbe i pezzi dell'altro.
+# Two workers can get the same video (subscribers of the same channel, a link sent twice):
+# they would write the same files and one's cleanup would delete the other's pieces.
 _video_locks: dict[str, threading.Lock] = {}
 _video_locks_guard = threading.Lock()
 
@@ -158,11 +158,11 @@ def _append_sponsor(text: str, *, limit: int, for_chat: Optional[int] = None) ->
 
 def _media_caption(text: str, *, for_chat: Optional[int] = None, source_url: str = "",
                    limit: int = CAPTION_LIMIT) -> str:
-    """HTML: il titolo del video può contenere < > &, quindi va escapato prima del link."""
+    """HTML: the video title can contain < > &, so it is escaped before the link is added."""
     source = f'<a href="{html.escape(source_url, quote=True)}">Fonte</a>' if source_url else ""
     sponsor = "" if _is_ad_free(for_chat) else _sponsor_block(min(SPONSOR_BLOCK_MAX, limit))
 
-    # Il limite di Telegram conta il testo visibile, non i tag.
+    # Telegram's limit counts the visible text, not the tags.
     tail = ("\n\nFonte" if source else "") + (f"\n\n{sponsor}" if sponsor else "")
     base = (text or "").strip()
     room = limit - len(tail)
@@ -443,8 +443,8 @@ def _message_url(message: types.Message) -> Optional[str]:
 def _link_for(message: types.Message) -> Optional[str]:
     if message.chat.type == "private":
         return _message_url(message)
-    # Nei gruppi si prova qualunque link: yt-dlp riconosce molti più siti di quelli elencati,
-    # e un link che non è un video fallisce in silenzio.
+    # In groups any link is tried: yt-dlp knows far more sites than the listed ones,
+    # and a link that is not a video fails silently.
     text = message.text or message.caption or ""
     if text.startswith("/"):
         return None
@@ -468,7 +468,7 @@ def _user_label(user: Any) -> str:
 
 
 def _requester(message: types.Message) -> tuple[int, str]:
-    # I post di un canale non hanno un utente: chi chiede è il canale stesso.
+    # Channel posts have no user: the requester is the channel itself.
     if message.from_user:
         return message.from_user.id, _user_label(message.from_user)
     return message.chat.id, f"canale {message.chat.title or message.chat.id}"
@@ -999,7 +999,7 @@ def _video_quality_key(fmt: dict) -> tuple:
     return (height, fps, tbr, vbr)
 
 
-# Lingue proposte in ⚙️ Impostazioni; None = la lingua originale del video.
+# Languages offered in ⚙️ Impostazioni; None = the video's original language.
 AUDIO_LANGS = {"it": "🇮🇹 Italiano", "en": "🇬🇧 English", "es": "🇪🇸 Español", "fr": "🇫🇷 Français"}
 
 
@@ -1013,10 +1013,10 @@ def _audio_rank(fmt: dict, audio_lang: Optional[str]) -> tuple:
 
 
 def _dub_lang_for(info: dict, audio_lang: Optional[str]) -> Optional[str]:
-    """La lingua da chiedere a yt-dlp, o None se basta l'originale.
+    """The language to ask yt-dlp for, or None when the original will do.
 
-    None anche quando la lingua scelta è già quella originale o il video non ha quel doppiaggio:
-    così la cache resta una sola per tutti quelli che ricevono la stessa traccia.
+    Also None when the chosen language already is the original or the video has no such dub:
+    that way there is a single cache entry for everyone who gets the same track.
     """
     if not audio_lang:
         return None
@@ -1030,8 +1030,8 @@ def _dub_lang_for(info: dict, audio_lang: Optional[str]) -> Optional[str]:
 
 
 def _audio_quality_key(fmt: dict) -> tuple:
-    # Con il doppiaggio automatico di YouTube ogni video ha più tracce audio, spesso con lo stesso
-    # bitrate: la lingua originale (language_preference 10, i doppiaggi -1) deve vincere sulla qualità.
+    # With YouTube's automatic dubbing a video has several audio tracks, often at the same
+    # bitrate: the original language (language_preference 10, dubs -1) must win over quality.
     lang = fmt.get("language_preference") or 0
     abr = fmt.get("abr") or 0
     tbr = fmt.get("tbr") or 0
@@ -1042,8 +1042,8 @@ def _audio_quality_key(fmt: dict) -> tuple:
 def _select_video_format_under_limit(info: dict, limit_bytes: int, audio_lang: Optional[str] = None) -> str:
     formats = info.get("formats") or []
     duration_s = info.get("duration")
-    # Il download rifà l'estrazione e YouTube può rispondere con id diversi (es. 140-1 invece di 140,
-    # sui video con più lingue audio): l'id scelto va sempre seguito da un'alternativa generica.
+    # The download extracts again and YouTube can answer with different ids (e.g. 140-1 instead of 140
+    # on videos with several audio languages): the chosen id is always followed by a generic fallback.
     fallback = _fallback_video_format(limit_bytes, audio_lang)
 
     progressive = [
@@ -1061,7 +1061,7 @@ def _select_video_format_under_limit(info: dict, limit_bytes: int, audio_lang: O
             and _format_size_or_estimate(f, duration_s) <= limit_bytes
         )
     ]
-    # I formati con audio incorporato hanno solo la traccia originale.
+    # Formats with built-in audio carry only the original track.
     if progressive_ok and not audio_lang:
         best = max(progressive_ok, key=_video_quality_key)
         return f"{best['format_id']}/{fallback}"
@@ -1117,7 +1117,7 @@ def _fallback_video_format(limit_bytes: int, audio_lang: Optional[str] = None) -
     else:
         cap = 1080
 
-    # Senza filtro sulla lingua l'ordinamento di yt-dlp mette già l'audio originale per primo.
+    # Without a language filter yt-dlp's sorting already puts the original audio first.
     dubbed = f"bestvideo[ext=mp4][height<={cap}]+bestaudio[ext=m4a][language^={audio_lang}]/" if audio_lang else ""
     return (
         f"{dubbed}bestvideo[ext=mp4][height<={cap}]+bestaudio[ext=m4a]/"
@@ -1636,7 +1636,7 @@ def _is_chat_admin(chat_id: int, user_id: int) -> bool:
 @bot.channel_post_handler(commands=["config", "impostazioni"])
 def handle_settings(message: types.Message) -> None:
     if message.chat.type != "private":
-        # In un canale, o da admin anonimo, scrive la chat stessa: solo chi la amministra può farlo.
+        # In a channel, or from an anonymous admin, the chat itself is the sender: only its admins can do that.
         by_chat = message.sender_chat is not None and message.sender_chat.id == message.chat.id
         if by_chat or (message.from_user and _is_chat_admin(message.chat.id, message.from_user.id)):
             text, kb = _chat_settings_view(message.chat.id)
@@ -1658,7 +1658,7 @@ def handle_settings_callbacks(call: types.CallbackQuery) -> None:
         try:
             bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=kb)
         except Exception:
-            pass  # stessa scelta di prima: Telegram rifiuta un messaggio identico
+            pass  # same choice as before: Telegram rejects an identical message
         return
     bot.answer_callback_query(call.id)
 
@@ -2081,8 +2081,8 @@ class DownloadTask:
 
 download_queue = queue.Queue()
 
-# Il feed dei canali elenca anche dirette e premiere programmate: non si possono ancora scaricare,
-# e una diretta in corso registrerebbe senza fine. Si riprovano finché non diventano un video normale.
+# The channel feed also lists scheduled lives and premieres: they cannot be downloaded yet,
+# and a live in progress would record forever. They are retried until they become a normal video.
 LIVE_RETRY_S = 3600
 LIVE_GIVE_UP_S = 4 * 24 * 3600
 _UPCOMING_RE = re.compile(r"live event will begin|Premieres in|is_upcoming|has not started", re.I)
@@ -2135,7 +2135,7 @@ for _ in range(2):
 
 
 def _url_temp_id(url: str) -> Optional[str]:
-    # L'id si ricava dal solo link, senza chiamare il sito: basta a capire se è già in archivio.
+    # The id comes from the link alone, without calling the site: enough to tell whether it is cached.
     for ie in yt_dlp.extractor.gen_extractor_classes():
         if ie.ie_key() != "Generic" and ie.suitable(url):
             try:
@@ -2149,7 +2149,7 @@ def _has_full_cache(url: str, user_id: int) -> bool:
     yt_id = _url_temp_id(url)
     if not yt_id:
         return False
-    # Con una lingua scelta si cerca solo il doppiaggio: l'originale da solo potrebbe non essere quello voluto.
+    # With a chosen language only the dub counts: the original alone might not be what was wanted.
     audio_lang = storage.get_audio_lang(DB_PATH, user_id)
     cached = storage.get_cache(DB_PATH, f"{yt_id}@{audio_lang}" if audio_lang else yt_id)
     return bool(cached and cached.get("video_file_id") and cached.get("audio_file_id"))
@@ -2181,13 +2181,13 @@ def handle_download(message: types.Message) -> None:
         return
 
     url = _link_for(message)
-    # Nei gruppi si scarica tutto senza chiedere: chi pubblica un link lo vuole lì, non in privato.
+    # In groups everything is downloaded without asking: whoever posts a link wants it there, not in private.
     if message.chat.type != "private":
         mode = _group_mode(message.chat.id)
         if mode:
             download_queue.put(DownloadTask(message, url, mode))
         return
-    # Già in archivio: si rimanda tutto subito, senza chiedere il formato né aspettare la coda.
+    # Already cached: send everything right away, without asking the format or waiting in the queue.
     if _has_full_cache(url, message.from_user.id):
         threading.Thread(target=_process_download, args=(DownloadTask(message, url, "B"),), daemon=True).start()
         return
@@ -2248,7 +2248,7 @@ def _process_download(task: DownloadTask) -> None:
     thumb_path = None
     lock = None
     uid, who = _requester(message)
-    # Gruppi e canali li leggono tutti: lì arrivano solo i contenuti, niente messaggi di servizio.
+    # Everyone reads groups and channels: only the content goes there, no service messages.
     in_group = message.chat.type != "private"
     show = storage.get_chat_settings(DB_PATH, message.chat.id) if in_group else dict.fromkeys(storage.CHAT_MEDIA_DEFAULTS, True)
 
@@ -2276,11 +2276,11 @@ def _process_download(task: DownloadTask) -> None:
 
         yt_id = info_preview.get("id") or str(int(time.time()))
         title = info_preview.get("title") or "Video"
-        # webpage_url è il link pulito (watch?v=…), senza i parametri di condivisione.
+        # webpage_url is the clean link (watch?v=…), without the sharing parameters.
         source_url = info_preview.get("webpage_url") or url
         lock = _video_lock(yt_id)
         lock.acquire()
-        # Lo stesso canale può arrivare da due iscrizioni (handle e link di un video): una volta basta.
+        # The same channel can come from two subscriptions (handle and a video link): once is enough.
         if task.from_subscription and storage.has_downloaded(DB_PATH, uid, yt_id):
             return
 
@@ -2296,14 +2296,14 @@ def _process_download(task: DownloadTask) -> None:
             pass
 
         dub_lang = _dub_lang_for(info_preview, storage.get_audio_lang(DB_PATH, uid))
-        # Un doppiaggio è un file diverso: in cache non può prendere il posto dell'originale.
+        # A dub is a different file: in the cache it cannot take the original's place.
         cache_key = f"{yt_id}@{dub_lang}" if dub_lang else yt_id
         cached = storage.get_cache(DB_PATH, cache_key)
         
         msg_photo = None
         msg_video = None
         msg_audio = None
-        # Senza anteprima il titolo resterebbe solo nel nome del file: va nella didascalia.
+        # Without the preview the title would only be in the file name: it goes into the caption.
         video_label = "🎬 Video" if show["thumb"] else f"🎬 {title}"
         audio_label = "🎵 Audio" if show["thumb"] else f"🎵 {title}"
         cache_tag = "" if in_group else " (cache)"
@@ -2460,7 +2460,7 @@ def _process_download(task: DownloadTask) -> None:
             _alert_bot_check()
             text = "YouTube sta bloccando i download dal server (verifica anti-bot). L'amministratore è avvisato: riprova più tardi."
         if in_group:
-            # Nei gruppi passano anche link che non sono video: fallire lì è normale, non un errore da segnalare.
+            # Groups also see links that are not videos: failing there is normal, not an error to report.
             print(f"Download in {message.chat.title or message.chat.id} non riuscito: {url}: {e}")
         else:
             bot.send_message(
@@ -2508,7 +2508,7 @@ def _channel_id_for(url: str) -> Optional[str]:
     stored = storage.get_channel_id(DB_PATH, url)
     if stored:
         return stored
-    # Un'iscrizione può essere un @handle o il link di un video del canale: si risolve una volta sola.
+    # A subscription can be an @handle or the link of one of the channel's videos: resolved only once.
     with _ydl({"quiet": True, "noplaylist": True, "extract_flat": True, "playlistend": 1}) as ydl:
         info = ydl.extract_info(url, download=False)
     cid = info.get("channel_id") or (info.get("id") if str(info.get("id", "")).startswith("UC") else None)
@@ -2518,7 +2518,7 @@ def _channel_id_for(url: str) -> Optional[str]:
 
 
 def _feed_video_ids(channel_id: str) -> tuple[list[str], Optional[str]]:
-    # Il feed RSS è leggero e non passa dalla verifica anti-bot che blocca le pagine del canale.
+    # The RSS feed is light and skips the bot check that blocks the channel pages.
     r = requests.get(f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}", timeout=20)
     r.raise_for_status()
     root = ET.fromstring(r.content)
@@ -2539,8 +2539,8 @@ def poll_subscriptions():
                         continue
                     last_saved_id = storage.get_channel_state(DB_PATH, channel_url)
                     storage.update_channel_state(DB_PATH, channel_url, ids[0], channel_title=c_title or None)
-                    # Senza un ultimo video riconoscibile (prima volta, o stato vecchio) si fissa solo il punto
-                    # di partenza: scaricare tutto il feed sarebbe un'alluvione.
+                    # Without a recognisable last video (first time, or old state) only the starting point is set:
+                    # downloading the whole feed would be a flood.
                     if last_saved_id not in ids:
                         continue
                     new_ids = ids[:ids.index(last_saved_id)][:3]
@@ -2572,7 +2572,7 @@ def notify_subscribers(channel_url: str, video_url: str, channel_title: Optional
             
             # Create a fake message object for the background download
             # We use message_id=-1 or 0 to indicate a background task
-            # de_json: il costruttore di Message cambia firma tra le versioni di pyTelegramBotAPI.
+            # de_json: Message's constructor changes signature across pyTelegramBotAPI versions.
             fake_message = types.Message.de_json({
                 "message_id": 0,
                 "from": {"id": user_id, "is_bot": False, "first_name": "Sub", "username": "sub"},
