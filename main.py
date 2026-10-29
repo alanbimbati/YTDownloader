@@ -5,6 +5,7 @@ import html
 import mimetypes
 import subprocess
 from typing import Any, Optional
+import itertools
 import queue
 import threading
 import xml.etree.ElementTree as ET
@@ -1847,35 +1848,80 @@ def handle_btn_broadcast_init(message: types.Message) -> None:
     bot.reply_to(message, _append_sponsor("Invia il comando `/broadcast Il_tuo_messaggio_qui` per inoltrarlo a tutti.", limit=TEXT_LIMIT, for_chat=message.chat.id))
 
 
+REPORT_PERIODS = {"1": "Oggi", "7": "7 giorni", "30": "30 giorni", "0": "Sempre"}
+REPORT_PLACES = {"private": "👤 Privato", "group": "👥 Gruppi", "channel": "📢 Canali", "unknown": "❔ Senza dettaglio"}
+
+
+def _report_view(period: str) -> tuple[str, types.InlineKeyboardMarkup]:
+    if period == "1":
+        since = int(time.mktime(time.localtime()[:3] + (0, 0, 0, 0, 0, -1)))
+    else:
+        since = int(time.time()) - int(period) * 86400 if period != "0" else 0
+    st = storage.get_dashboard_stats(DB_PATH, since)
+    pct = lambda n, d: f"{round(100 * n / d)}%" if d else "–"
+
+    lines = [
+        f"📊 <b>Statistiche · {REPORT_PERIODS[period]}</b>",
+        "",
+        "<b>Utenti</b>",
+        f"Attivi nel periodo: {st['users_active']}",
+        f"Conosciuti in totale: {st['users_known']}",
+        f"Che pagano: {st['users_paying']}",
+        "",
+        "<b>Download</b>",
+        f"Totali: {st['downloads']} ({st['distinct_videos']} video diversi)",
+        f"Dalla cache: {st['from_cache']} ({pct(st['from_cache'], st['downloads'])})",
+    ]
+    for place, label in REPORT_PLACES.items():
+        if place in st["by_place"]:
+            downloads, chats = st["by_place"][place]
+            where = f" in {chats} chat" if place in ("group", "channel") else ""
+            lines.append(f"{label}: {downloads}{where}")
+    lines += [
+        "",
+        "<b>Archivio e iscrizioni</b>",
+        f"Video in cache: {st['cached_videos']}",
+        f"Iscrizioni: {st['subscriptions']} a {st['subscribed_channels']} canali",
+    ]
+    if st["top_videos"]:
+        lines += ["", "<b>Più scaricati</b>"]
+        lines += [f"{n}× {html.escape((title or 'Video')[:60], quote=False)}" for title, n in st["top_videos"]]
+    if st["top_requesters"]:
+        lines += ["", "<b>Chi scarica di più</b>"]
+        for uid, first_name, username, n in st["top_requesters"]:
+            who = f"@{username}" if username else (first_name or ("canale " if uid < 0 else "id ") + str(uid))
+            lines.append(f"{n}× {html.escape(who, quote=False)}")
+
+    kb = types.InlineKeyboardMarkup(row_width=4)
+    kb.add(*[
+        types.InlineKeyboardButton(("• " if key == period else "") + label, callback_data=f"rep:{key}")
+        for key, label in REPORT_PERIODS.items()
+    ])
+    return "\n".join(lines), kb
+
+
 @bot.message_handler(commands=["report"])
 def handle_report(message: types.Message) -> None:
     if message.from_user.id != ADMIN_USER_ID:
         bot.reply_to(message, _append_sponsor("Non autorizzato.", limit=TEXT_LIMIT, for_chat=message.chat.id))
         return
+    text, kb = _report_view("7")
+    bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=kb)
 
-    stats = storage.get_report_stats(DB_PATH)
-    
-    text = "📊 **Report Statistiche YTDownloader** 📊\n"
-    text += f"Totale Download: {stats['total_downloads']}\n"
-    text += f"Utenti Unici: {stats['unique_users']}\n"
-    text += f"Iscrizioni Totali: {stats['total_subscriptions']}\n\n"
-    text += "🕒 **Ultimi 10 download:**\n"
-    
-    for u_id, y_id, title, ts, first_name, username in stats['recent_downloads']:
-        dt = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts))
-        user_label = first_name or str(u_id)
-        if username:
-            user_label += f" (@{username})"
-        
-        # Markdown Link: [Title](URL)
-        video_url = f"https://www.youtube.com/watch?v={y_id}" if len(y_id) == 11 else f"https://youtu.be/{y_id}"
-        # For non-YT videos, yt_id might be different, but ytdlp IDs are generally good enough for links if we assume YT.
-        # However, to be safe, we just link to the ID if it looks like YT, otherwise just show title.
-        link_md = f"[{title}]({video_url})" if title else f"`{y_id}`"
-        
-        text += f"- `[{dt}]` {user_label} -> {link_md}\n"
-        
-    bot.send_message(message.chat.id, _append_sponsor(text, limit=TEXT_LIMIT, for_chat=message.chat.id), parse_mode="Markdown", reply_to_message_id=_get_msg_id(message))
+
+@bot.callback_query_handler(func=lambda c: (c.data or "").startswith("rep:"))
+def handle_report_period(call: types.CallbackQuery) -> None:
+    period = (call.data or "").split(":", 1)[1]
+    if call.from_user.id != ADMIN_USER_ID or period not in REPORT_PERIODS:
+        bot.answer_callback_query(call.id)
+        return
+    bot.answer_callback_query(call.id)
+    text, kb = _report_view(period)
+    try:
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        pass  # same period as before: Telegram rejects an identical message
+
 
 @bot.message_handler(commands=["broadcast"])
 def handle_broadcast(message: types.Message) -> None:
@@ -2078,8 +2124,29 @@ class DownloadTask:
         self.from_subscription = from_subscription
         self.first_seen = time.time()
         self.postponed = False
+        self.priority = 0 if _is_paying(message) else 1
+        self.seq = next(_task_seq)
 
-download_queue = queue.Queue()
+    # PriorityQueue orders tasks by this: payers first, then first come first served.
+    def __lt__(self, other: "DownloadTask") -> bool:
+        return (self.priority, self.seq) < (other.priority, other.seq)
+
+
+_task_seq = itertools.count()
+
+
+def _is_paying(message: types.Message) -> bool:
+    # Today paying means the ad-free unlock; a future plan only needs to be added here.
+    uid, _ = _requester(message)
+    return uid == ADMIN_USER_ID or storage.is_ad_free(DB_PATH, uid) or storage.is_ad_free(DB_PATH, message.chat.id)
+
+
+def _queue_position(task: DownloadTask) -> int:
+    with download_queue.mutex:
+        return 1 + sum(1 for t in download_queue.queue if t < task)
+
+
+download_queue: "queue.PriorityQueue[DownloadTask]" = queue.PriorityQueue()
 
 # The channel feed also lists scheduled lives and premieres: they cannot be downloaded yet,
 # and a live in progress would record forever. They are retried until they become a normal video.
@@ -2226,14 +2293,14 @@ def handle_dl_choice(call: types.CallbackQuery) -> None:
         except Exception:
             pass
             
-        qsize = download_queue.qsize()
         original_message = call.message.reply_to_message or call.message
+        task = DownloadTask(original_message, url, mode)
         bot.send_message(
             call.message.chat.id, 
-            _append_sponsor(f"⏳ Richiesta accodata. Posizione stimata: {qsize + 1}...", limit=TEXT_LIMIT, for_chat=call.message.chat.id),
+            _append_sponsor(f"⏳ Richiesta accodata. Posizione stimata: {_queue_position(task)}...", limit=TEXT_LIMIT, for_chat=call.message.chat.id),
             reply_to_message_id=_get_msg_id(original_message)
         )
-        download_queue.put(DownloadTask(original_message, url, mode))
+        download_queue.put(task)
     except Exception as e:
         bot.answer_callback_query(call.id, f"Errore: {e}")
 
@@ -2342,7 +2409,8 @@ def _process_download(task: DownloadTask) -> None:
                     parse_mode="HTML",
                 )
             
-            storage.log_download(DB_PATH, uid, yt_id, yt_title=title)
+            storage.log_download(DB_PATH, uid, yt_id, yt_title=title, chat_id=message.chat.id,
+                                 chat_type=message.chat.type, from_cache=True)
             if uid != ADMIN_USER_ID:
                 bot.send_message(
                     ADMIN_USER_ID,
@@ -2420,7 +2488,8 @@ def _process_download(task: DownloadTask) -> None:
                     audio_file_id=_file_id_from_result(msg_audio, "audio"),
                 )
             
-            storage.log_download(DB_PATH, uid, yt_id, yt_title=title)
+            storage.log_download(DB_PATH, uid, yt_id, yt_title=title, chat_id=message.chat.id,
+                                 chat_type=message.chat.type)
             if uid != ADMIN_USER_ID:
                 bot.send_message(
                     ADMIN_USER_ID,

@@ -179,6 +179,13 @@ def init_db(db_path: str) -> None:
         except sqlite3.OperationalError:
             pass # already exists
 
+        # Where each download happened and whether it came from the cache, for the stats dashboard.
+        for col, decl in (("chat_id", "INTEGER"), ("chat_type", "TEXT"), ("from_cache", "INTEGER")):
+            try:
+                conn.execute(f"ALTER TABLE downloads_log ADD COLUMN {col} {decl}")
+            except sqlite3.OperationalError:
+                pass # already exists
+
         try:
             conn.execute("ALTER TABLE channels_state ADD COLUMN channel_title TEXT")
         except sqlite3.OperationalError:
@@ -643,39 +650,63 @@ def has_downloaded(db_path: str, user_id: int, yt_id: str) -> bool:
     return row is not None
 
 
-def log_download(db_path: str, user_id: int, yt_id: str, yt_title: Optional[str] = None) -> None:
+def log_download(db_path: str, user_id: int, yt_id: str, yt_title: Optional[str] = None, *,
+                 chat_id: Optional[int] = None, chat_type: Optional[str] = None, from_cache: bool = False) -> None:
     now = int(time.time())
     with _connect(db_path) as conn:
         conn.execute(
             """
-            INSERT INTO downloads_log (user_id, yt_id, yt_title, downloaded_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO downloads_log (user_id, yt_id, yt_title, downloaded_at, chat_id, chat_type, from_cache)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (user_id, yt_id, yt_title or "Video", now),
+            (user_id, yt_id, yt_title or "Video", now, chat_id, chat_type, int(from_cache)),
         )
 
 
-def get_report_stats(db_path: str) -> dict:
+def get_dashboard_stats(db_path: str, since: int = 0) -> dict:
+    # Telegram calls basic groups "group" and the rest "supergroup": for the stats they are one thing.
+    where = "CASE WHEN chat_type IN ('group', 'supergroup') THEN 'group' ELSE COALESCE(chat_type, 'unknown') END"
     with _connect(db_path) as conn:
-        total_downloads = conn.execute("SELECT COUNT(*) FROM downloads_log").fetchone()[0]
-        unique_users = conn.execute("SELECT COUNT(DISTINCT user_id) FROM downloads_log").fetchone()[0]
-        recent = conn.execute(
-            """
-            SELECT l.user_id, l.yt_id, l.yt_title, l.downloaded_at, u.first_name, u.username
-            FROM downloads_log l
-            LEFT JOIN users u ON l.user_id = u.user_id
-            ORDER BY l.downloaded_at DESC LIMIT 10
-            """
-        ).fetchall()
-        
-        subs_count = conn.execute("SELECT COUNT(*) FROM subscriptions").fetchone()[0]
-    
-    return {
-        "total_downloads": total_downloads,
-        "unique_users": unique_users,
-        "recent_downloads": recent,
-        "total_subscriptions": subs_count,
-    }
+        one = lambda sql, *args: conn.execute(sql, args).fetchone()[0]
+        by_place = {
+            place: (downloads, chats)
+            for place, downloads, chats in conn.execute(
+                f"""
+                SELECT {where}, COUNT(*), COUNT(DISTINCT chat_id)
+                FROM downloads_log WHERE downloaded_at >= ? GROUP BY 1
+                """,
+                (since,),
+            )
+        }
+        return {
+            "users_known": one("SELECT COUNT(*) FROM users"),
+            "users_active": one("SELECT COUNT(DISTINCT user_id) FROM downloads_log WHERE user_id > 0 AND downloaded_at >= ?", since),
+            "users_paying": one("SELECT COUNT(*) FROM ad_free"),
+            "downloads": one("SELECT COUNT(*) FROM downloads_log WHERE downloaded_at >= ?", since),
+            "from_cache": one("SELECT COUNT(*) FROM downloads_log WHERE from_cache = 1 AND downloaded_at >= ?", since),
+            "distinct_videos": one("SELECT COUNT(DISTINCT yt_id) FROM downloads_log WHERE downloaded_at >= ?", since),
+            "by_place": by_place,
+            "cached_videos": one(
+                "SELECT COUNT(*) FROM cache WHERE fmt_v = ? AND video_file_id <> '' AND audio_file_id <> ''", CACHE_FORMAT
+            ),
+            "subscriptions": one("SELECT COUNT(*) FROM subscriptions"),
+            "subscribed_channels": one("SELECT COUNT(DISTINCT channel_url) FROM subscriptions"),
+            "top_videos": conn.execute(
+                """
+                SELECT MAX(yt_title), COUNT(*) FROM downloads_log WHERE downloaded_at >= ?
+                GROUP BY yt_id ORDER BY 2 DESC LIMIT 5
+                """,
+                (since,),
+            ).fetchall(),
+            "top_requesters": conn.execute(
+                """
+                SELECT l.user_id, u.first_name, u.username, COUNT(*) FROM downloads_log l
+                LEFT JOIN users u ON u.user_id = l.user_id
+                WHERE l.downloaded_at >= ? GROUP BY l.user_id ORDER BY 4 DESC LIMIT 5
+                """,
+                (since,),
+            ).fetchall(),
+        }
 
 
 def add_subscription(db_path: str, user_id: int, channel_url: str) -> bool:
