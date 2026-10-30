@@ -1584,8 +1584,13 @@ def handle_ad_free_offer(message: types.Message) -> None:
     )
 
 
-def _settings_view(user_id: int) -> tuple[str, types.InlineKeyboardMarkup]:
-    current = storage.get_audio_lang(DB_PATH, user_id)
+CHAT_MEDIA_LABELS = {"sticker": "🏷 Sticker", "thumb": "🖼 Anteprima", "video": "🎬 Video", "audio": "🎵 Audio"}
+
+
+def _settings_view(chat_id: int) -> tuple[str, types.InlineKeyboardMarkup]:
+    # One panel for private chats and groups alike: in a group the settings belong to the group.
+    current = storage.get_audio_lang(DB_PATH, chat_id)
+    show = storage.get_chat_settings(DB_PATH, chat_id)
     kb = types.InlineKeyboardMarkup(row_width=2)
     choices = [("orig", "🌐 Originale")] + list(AUDIO_LANGS.items())
     kb.add(*[
@@ -1595,30 +1600,19 @@ def _settings_view(user_id: int) -> tuple[str, types.InlineKeyboardMarkup]:
         )
         for code, label in choices
     ])
-    current_label = AUDIO_LANGS.get(current, "🌐 Originale") if current else "🌐 Originale"
-    text = (
-        "⚙️ Impostazioni\n\n"
-        f"🎧 Lingua dell'audio: {current_label}\n\n"
-        "Molti video YouTube hanno anche tracce doppiate. Se il video non ha la lingua scelta, "
-        "ricevi quella originale."
-    )
-    return text, kb
-
-
-CHAT_MEDIA_LABELS = {"sticker": "🏷 Sticker", "thumb": "🖼 Anteprima", "video": "🎬 Video", "audio": "🎵 Audio"}
-
-
-def _chat_settings_view(chat_id: int) -> tuple[str, types.InlineKeyboardMarkup]:
-    show = storage.get_chat_settings(DB_PATH, chat_id)
-    kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(*[
-        types.InlineKeyboardButton(("✅ " if show[key] else "❌ ") + label, callback_data=f"gcfg:{key}")
+        types.InlineKeyboardButton(("✅ " if show[key] else "❌ ") + label, callback_data=f"cfg:media:{key}")
         for key, label in CHAT_MEDIA_LABELS.items()
     ])
+    current_label = AUDIO_LANGS.get(current, "🌐 Originale") if current else "🌐 Originale"
+    is_group = chat_id < 0
     text = (
-        "⚙️ Impostazioni del gruppo\n\n"
-        "Cosa invio quando qui viene pubblicato un link. Tocca per accendere o spegnere: "
-        "possono cambiarlo solo gli amministratori."
+        f"⚙️ Impostazioni{' del gruppo' if is_group else ''}\n\n"
+        f"🎧 Lingua dell'audio: {current_label}\n"
+        "Molti video YouTube hanno anche tracce doppiate. Se il video non ha la lingua scelta, "
+        "arriva quella originale.\n\n"
+        f"📦 Cosa {'invio qui' if is_group else 'ricevi'}: tocca per accendere o spegnere."
+        + ("\n\nPossono cambiarle solo gli amministratori." if is_group else "")
     )
     return text, kb
 
@@ -1640,47 +1634,42 @@ def handle_settings(message: types.Message) -> None:
         # In a channel, or from an anonymous admin, the chat itself is the sender: only its admins can do that.
         by_chat = message.sender_chat is not None and message.sender_chat.id == message.chat.id
         if by_chat or (message.from_user and _is_chat_admin(message.chat.id, message.from_user.id)):
-            text, kb = _chat_settings_view(message.chat.id)
+            text, kb = _settings_view(message.chat.id)
             bot.send_message(message.chat.id, text, reply_markup=kb)
         return
     if not _ensure_authorized(message):
         return
-    text, kb = _settings_view(message.from_user.id)
+    text, kb = _settings_view(message.chat.id)
     bot.send_message(message.chat.id, text, reply_markup=kb)
 
 
-@bot.callback_query_handler(func=lambda c: (c.data or "").startswith("cfg:"))
+# "gcfg:" is what the group panels sent before language and media shared one panel.
+@bot.callback_query_handler(func=lambda c: (c.data or "").startswith(("cfg:", "gcfg:")))
 def handle_settings_callbacks(call: types.CallbackQuery) -> None:
     parts = (call.data or "").split(":")
-    if len(parts) == 3 and parts[1] == "lang" and (parts[2] == "orig" or parts[2] in AUDIO_LANGS):
-        storage.set_audio_lang(DB_PATH, call.from_user.id, None if parts[2] == "orig" else parts[2])
-        bot.answer_callback_query(call.id, "Salvato")
-        text, kb = _settings_view(call.from_user.id)
-        try:
-            bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=kb)
-        except Exception:
-            pass  # same choice as before: Telegram rejects an identical message
-        return
-    bot.answer_callback_query(call.id)
-
-
-@bot.callback_query_handler(func=lambda c: (c.data or "").startswith("gcfg:"))
-def handle_chat_settings_callbacks(call: types.CallbackQuery) -> None:
-    key = (call.data or "").split(":", 1)[1]
+    if parts[0] == "gcfg":
+        parts = ["cfg", "media"] + parts[1:]
     chat_id = call.message.chat.id
-    if key not in CHAT_MEDIA_LABELS:
+    valid = len(parts) == 3 and (
+        (parts[1] == "lang" and (parts[2] == "orig" or parts[2] in AUDIO_LANGS))
+        or (parts[1] == "media" and parts[2] in CHAT_MEDIA_LABELS)
+    )
+    if not valid:
         bot.answer_callback_query(call.id)
         return
-    if not _is_chat_admin(chat_id, call.from_user.id):
+    if call.message.chat.type != "private" and not _is_chat_admin(chat_id, call.from_user.id):
         bot.answer_callback_query(call.id, "Solo gli amministratori possono cambiarlo.")
         return
-    storage.toggle_chat_setting(DB_PATH, chat_id, key)
+    if parts[1] == "lang":
+        storage.set_audio_lang(DB_PATH, chat_id, None if parts[2] == "orig" else parts[2])
+    else:
+        storage.toggle_chat_setting(DB_PATH, chat_id, parts[2])
     bot.answer_callback_query(call.id, "Salvato")
-    text, kb = _chat_settings_view(chat_id)
+    text, kb = _settings_view(chat_id)
     try:
         bot.edit_message_text(text, chat_id, call.message.message_id, reply_markup=kb)
     except Exception:
-        pass
+        pass  # same choice as before: Telegram rejects an identical message
 
 
 @bot.message_handler(func=lambda m: m.text == "🚫 Togli la pubblicità")
@@ -2222,7 +2211,7 @@ def _has_full_cache(url: str, user_id: int) -> bool:
     return bool(cached and cached.get("video_file_id") and cached.get("audio_file_id"))
 
 
-def _group_mode(chat_id: int) -> Optional[str]:
+def _media_mode(chat_id: int) -> Optional[str]:
     show = storage.get_chat_settings(DB_PATH, chat_id)
     if show["video"] and show["audio"]:
         return "B"
@@ -2234,7 +2223,7 @@ def _group_mode(chat_id: int) -> Optional[str]:
     func=lambda m: _link_for(m) is not None,
 )
 def handle_channel_download(message: types.Message) -> None:
-    mode = _group_mode(message.chat.id)
+    mode = _media_mode(message.chat.id)
     if mode:
         download_queue.put(DownloadTask(message, _link_for(message), mode))
 
@@ -2249,14 +2238,17 @@ def handle_download(message: types.Message) -> None:
 
     url = _link_for(message)
     # In groups everything is downloaded without asking: whoever posts a link wants it there, not in private.
+    mode = _media_mode(message.chat.id)
     if message.chat.type != "private":
-        mode = _group_mode(message.chat.id)
         if mode:
             download_queue.put(DownloadTask(message, url, mode))
         return
+    if not mode:
+        bot.reply_to(message, "Hai spento sia il video sia l'audio in ⚙️ Impostazioni: riaccendine almeno uno.")
+        return
     # Already cached: send everything right away, without asking the format or waiting in the queue.
-    if _has_full_cache(url, message.from_user.id):
-        threading.Thread(target=_process_download, args=(DownloadTask(message, url, "B"),), daemon=True).start()
+    if _has_full_cache(url, message.chat.id):
+        threading.Thread(target=_process_download, args=(DownloadTask(message, url, mode),), daemon=True).start()
         return
 
     if message.from_user.id != ADMIN_USER_ID:
@@ -2264,6 +2256,14 @@ def handle_download(message: types.Message) -> None:
         if count >= 3:
             bot.reply_to(message, _append_sponsor("Hai raggiunto il limite di 3 download all'ora. Riprova più tardi.", limit=TEXT_LIMIT, for_chat=message.chat.id))
             return
+
+    # With only one of video and audio turned on there is nothing to choose.
+    if mode != "B":
+        task = DownloadTask(message, url, mode)
+        bot.reply_to(message, _append_sponsor(f"⏳ Richiesta accodata. Posizione stimata: {_queue_position(task)}...",
+                                              limit=TEXT_LIMIT, for_chat=message.chat.id))
+        download_queue.put(task)
+        return
 
     # Invia scelte via InlineKeyboardMarkup
     url_id = storage.save_url_cache(DB_PATH, url)
@@ -2317,7 +2317,7 @@ def _process_download(task: DownloadTask) -> None:
     uid, who = _requester(message)
     # Everyone reads groups and channels: only the content goes there, no service messages.
     in_group = message.chat.type != "private"
-    show = storage.get_chat_settings(DB_PATH, message.chat.id) if in_group else dict.fromkeys(storage.CHAT_MEDIA_DEFAULTS, True)
+    show = storage.get_chat_settings(DB_PATH, message.chat.id)
 
     try:
         msg_id = _get_msg_id(message)
@@ -2362,7 +2362,8 @@ def _process_download(task: DownloadTask) -> None:
         except Exception:
             pass
 
-        dub_lang = _dub_lang_for(info_preview, storage.get_audio_lang(DB_PATH, uid))
+        # The language belongs to the chat: in a group it is the group's, not the poster's.
+        dub_lang = _dub_lang_for(info_preview, storage.get_audio_lang(DB_PATH, message.chat.id))
         # A dub is a different file: in the cache it cannot take the original's place.
         cache_key = f"{yt_id}@{dub_lang}" if dub_lang else yt_id
         cached = storage.get_cache(DB_PATH, cache_key)
@@ -2649,10 +2650,12 @@ def notify_subscribers(channel_url: str, video_url: str, channel_title: Optional
                 "chat": {"id": user_id, "type": "private"},
                 "text": video_url,
             })
-            download_queue.put(
-                DownloadTask(fake_message, video_url, mode="B", auto_publish=(user_id == ADMIN_USER_ID),
-                             from_subscription=True)
-            )
+            mode = _media_mode(user_id)
+            if mode:
+                download_queue.put(
+                    DownloadTask(fake_message, video_url, mode=mode, auto_publish=(user_id == ADMIN_USER_ID),
+                                 from_subscription=True)
+                )
         except Exception as e:
             print(f"Errore nella notifica all'utente {user_id}: {e}")
 

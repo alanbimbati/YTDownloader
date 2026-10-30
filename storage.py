@@ -499,6 +499,8 @@ def set_audio_lang(db_path: str, user_id: int, audio_lang: Optional[str]) -> Non
 
 # By default a group gets only the content: sticker and preview are turned on on request.
 CHAT_MEDIA_DEFAULTS = {"sticker": False, "thumb": False, "video": True, "audio": True}
+# A private chat keeps getting everything, as it did before these settings existed.
+PRIVATE_MEDIA_DEFAULTS = dict.fromkeys(CHAT_MEDIA_DEFAULTS, True)
 
 
 def get_chat_settings(db_path: str, chat_id: int) -> dict[str, bool]:
@@ -507,7 +509,8 @@ def get_chat_settings(db_path: str, chat_id: int) -> dict[str, bool]:
             "SELECT sticker, thumb, video, audio FROM chat_settings WHERE chat_id=?", (chat_id,)
         ).fetchone()
     if not row:
-        return dict(CHAT_MEDIA_DEFAULTS)
+        # Telegram gives users positive ids, groups and channels negative ones.
+        return dict(PRIVATE_MEDIA_DEFAULTS if chat_id > 0 else CHAT_MEDIA_DEFAULTS)
     return dict(zip(CHAT_MEDIA_DEFAULTS, map(bool, row)))
 
 
