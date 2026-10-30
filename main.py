@@ -1577,7 +1577,9 @@ def handle_ad_free_offer(message: types.Message) -> None:
     )
 
 
-CHAT_MEDIA_LABELS = {"sticker": "🏷 Sticker", "thumb": "🖼 Anteprima", "video": "🎬 Video", "audio": "🎵 Audio"}
+CHAT_MEDIA_LABELS = {
+    "sticker": "🏷 Sticker", "thumb": "🖼 Anteprima", "video": "🎬 Video", "audio": "🎵 Audio", "articles": "📰 Articoli",
+}
 
 
 def _settings_view(chat_id: int) -> tuple[str, types.InlineKeyboardMarkup]:
@@ -1796,7 +1798,7 @@ HELP_TEXT = (
     "/unsub link del canale: togli un'iscrizione\n\n"
     "⚙️ /impostazioni\n"
     "La lingua dell'audio (originale, italiano, inglese, spagnolo o francese, se il video ha il doppiaggio) "
-    "e cosa ricevere: sticker, anteprima, video, audio.\n\n"
+    "e cosa ricevere: sticker, anteprima, video, audio, articoli.\n\n"
     "👥 Gruppi e canali\n"
     "Aggiungimi come amministratore: scarico ogni link pubblicato, senza domande e senza messaggi di errore. "
     "Gli amministratori scelgono lingua e cosa inviare con /impostazioni.\n\n"
@@ -2353,8 +2355,13 @@ def handle_download(message: types.Message) -> None:
 def _route_link(message: types.Message, url: str) -> None:
     if _is_supported_url(url) or _url_temp_id(url) is not None:
         _route_video(message, url)
-    else:
+    elif storage.get_chat_settings(DB_PATH, message.chat.id)["articles"]:
         threading.Thread(target=_send_article, args=(message, url), daemon=True).start()
+    elif message.chat.type != "private":
+        # Articles turned off here: the link may still be a video on a site yt-dlp handles generically.
+        _route_video(message, url)
+    else:
+        bot.reply_to(message, "Gli articoli sono spenti in ⚙️ Impostazioni: riaccendili per riceverli puliti.")
 
 
 def _route_video(message: types.Message, url: str) -> None:

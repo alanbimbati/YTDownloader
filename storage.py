@@ -207,6 +207,11 @@ def init_db(db_path: str) -> None:
                 pass # already exists
 
         try:
+            conn.execute("ALTER TABLE chat_settings ADD COLUMN articles INTEGER NOT NULL DEFAULT 1")
+        except sqlite3.OperationalError:
+            pass # already exists
+
+        try:
             conn.execute("ALTER TABLE channels_state ADD COLUMN channel_title TEXT")
         except sqlite3.OperationalError:
             pass # already exists
@@ -518,7 +523,7 @@ def set_audio_lang(db_path: str, user_id: int, audio_lang: Optional[str]) -> Non
 
 
 # By default a group gets only the content: sticker and preview are turned on on request.
-CHAT_MEDIA_DEFAULTS = {"sticker": False, "thumb": False, "video": True, "audio": True}
+CHAT_MEDIA_DEFAULTS = {"sticker": False, "thumb": False, "video": True, "audio": True, "articles": True}
 # A private chat keeps getting everything, as it did before these settings existed.
 PRIVATE_MEDIA_DEFAULTS = dict.fromkeys(CHAT_MEDIA_DEFAULTS, True)
 
@@ -526,7 +531,7 @@ PRIVATE_MEDIA_DEFAULTS = dict.fromkeys(CHAT_MEDIA_DEFAULTS, True)
 def get_chat_settings(db_path: str, chat_id: int) -> dict[str, bool]:
     with _connect(db_path) as conn:
         row = conn.execute(
-            "SELECT sticker, thumb, video, audio FROM chat_settings WHERE chat_id=?", (chat_id,)
+            f"SELECT {', '.join(CHAT_MEDIA_DEFAULTS)} FROM chat_settings WHERE chat_id=?", (chat_id,)
         ).fetchone()
     if not row:
         # Telegram gives users positive ids, groups and channels negative ones.
@@ -537,12 +542,13 @@ def get_chat_settings(db_path: str, chat_id: int) -> dict[str, bool]:
 def toggle_chat_setting(db_path: str, chat_id: int, key: str) -> dict[str, bool]:
     settings = get_chat_settings(db_path, chat_id)
     settings[key] = not settings[key]
+    cols = ", ".join(CHAT_MEDIA_DEFAULTS)
+    updates = ", ".join(f"{k}=excluded.{k}" for k in CHAT_MEDIA_DEFAULTS)
     with _connect(db_path) as conn:
         conn.execute(
-            """
-            INSERT INTO chat_settings (chat_id, sticker, thumb, video, audio) VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(chat_id) DO UPDATE SET
-                sticker=excluded.sticker, thumb=excluded.thumb, video=excluded.video, audio=excluded.audio
+            f"""
+            INSERT INTO chat_settings (chat_id, {cols}) VALUES (?{", ?" * len(CHAT_MEDIA_DEFAULTS)})
+            ON CONFLICT(chat_id) DO UPDATE SET {updates}
             """,
             (chat_id, *(int(settings[k]) for k in CHAT_MEDIA_DEFAULTS)),
         )
