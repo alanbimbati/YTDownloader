@@ -686,6 +686,17 @@ def add_pending(db_path: str, user_id: int, username: str) -> None:
         )
 
 
+def is_known_user(db_path: str, user_id: int) -> bool:
+    """Read-only, so it is safe on another bot's database."""
+    if not os.path.exists(db_path):
+        return False
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+            return conn.execute("SELECT 1 FROM users WHERE user_id=?", (user_id,)).fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
 def upsert_user(db_path: str, user_id: int, first_name: str, username: str) -> None:
     now = int(time.time())
     with _connect(db_path) as conn:

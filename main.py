@@ -26,6 +26,8 @@ from config import (
     BITCOIN_CHANNEL,
     BITCOIN_HUB,
     BOT_TOKEN,
+    HANDOFF_DB,
+    MOVED_TO,
     COOKIES_FILE,
     DB_PATH,
     MAX_UPLOAD_BYTES,
@@ -131,12 +133,18 @@ def _is_ad_free(chat_id: Optional[int]) -> bool:
         return False
 
 
+def _moved_notice() -> str:
+    return f"📢 Ci siamo spostati su {MOVED_TO}: aprilo e premi Avvia." if MOVED_TO else ""
+
+
 def _append_sponsor(text: str, *, limit: int, for_chat: Optional[int] = None) -> str:
     base = (text or "").strip()
-    if SPONSOR_HEADER.lower() in base.lower() or _is_ad_free(for_chat):
+    if SPONSOR_HEADER.lower() in base.lower() or (MOVED_TO and MOVED_TO in base):
         return base[:limit]
 
-    suffix = _sponsor_block(min(SPONSOR_BLOCK_MAX, limit))
+    sponsor = "" if _is_ad_free(for_chat) else _sponsor_block(min(SPONSOR_BLOCK_MAX, limit))
+    # The notice is not an ad: ad-free users get it too.
+    suffix = "\n\n".join(p for p in (_moved_notice(), sponsor) if p)
     if not suffix:
         return base[:limit]
 
@@ -164,6 +172,7 @@ def _media_caption(text: str, *, for_chat: Optional[int] = None, source_url: str
     """HTML: the video title can contain < > &, so it is escaped before the link is added."""
     source = f'<a href="{html.escape(source_url, quote=True)}">Fonte</a>' if source_url else ""
     sponsor = "" if _is_ad_free(for_chat) else _sponsor_block(min(SPONSOR_BLOCK_MAX, limit))
+    sponsor = "\n\n".join(p for p in (_moved_notice(), sponsor) if p)
 
     # Telegram's limit counts the visible text, not the tags.
     tail = ("\n\nFonte" if source else "") + (f"\n\n{sponsor}" if sponsor else "")
@@ -459,7 +468,8 @@ def _requester(message: types.Message) -> tuple[int, str]:
 
 
 def _ensure_authorized(message: types.Message) -> bool:
-    if message.from_user:
+    # Only private contacts count: the bot can write only to whoever started it.
+    if message.from_user and message.chat.type == "private":
         storage.upsert_user(
             DB_PATH, 
             message.from_user.id, 
@@ -2243,6 +2253,8 @@ def _send_article(message: types.Message, url: str) -> None:
             f'<a href="{html.escape(telegraph_url)}">{html.escape(title, quote=False)}</a>\n\n'
             f'via <a href="{html.escape(source)}">{html.escape(articles.site_of(source))}</a>'
         )
+        if MOVED_TO:
+            text += f"\n\n{html.escape(_moved_notice(), quote=False)}"
         msg_id = _get_msg_id(message)
         bot.send_message(message.chat.id, text, parse_mode="HTML",
                          reply_to_message_id=msg_id if msg_id and msg_id > 0 else None)
@@ -2679,6 +2691,9 @@ def notify_subscribers(channel_url: str, video_url: str, channel_title: Optional
         
     display_name = channel_title or channel_url
     for user_id in target_users:
+        # Whoever already started the new bot gets the video from there: from both it would arrive twice.
+        if HANDOFF_DB and storage.is_known_user(HANDOFF_DB, user_id):
+            continue
         try:
             text = f"🔔 Nuovo video dal canale {display_name}!\nVerrà scaricato automaticamente."
             if user_id == ADMIN_USER_ID:

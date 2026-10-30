@@ -32,3 +32,8 @@ AD_FREE_PAYEE = os.getenv("AD_FREE_PAYEE", "@AlanBimbati")
 # YouTube cookies (Netscape format) of a logged-in account: without them, from the Raspberry's IP
 # YouTube answers "Sign in to confirm you're not a bot". If the file is missing, go without.
 COOKIES_FILE = os.getenv("COOKIES_FILE", "cookies.txt")
+
+# Set on a bot that has been replaced: it keeps working, but every message points to MOVED_TO
+# and users who already started the new bot (found in HANDOFF_DB) get their subscriptions there.
+MOVED_TO = os.getenv("MOVED_TO", "").strip()
+HANDOFF_DB = os.getenv("HANDOFF_DB", "").strip()

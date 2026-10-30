@@ -11,16 +11,16 @@ services:
     volumes:
       - telegram-bot-api-data:/var/lib/telegram-bot-api
 
+  # @MyYTDowbloaderbot: replaced by @OrtixifyBot, kept running so its users are not cut off.
   ytdownloader-bot:
     build: .
     restart: unless-stopped
     depends_on:
       - telegram-bot-api
-    environment:
+    environment: &bot-env
       BOT_TOKEN: ${BOT_TOKEN}
       ADMIN_USER_ID: ${ADMIN_USER_ID}
       ADMIN_CONTACT: ${ADMIN_CONTACT:-}
-      BITCOIN_HUB: ${BITCOIN_HUB:-}
       BITCOIN_CHANNEL: ${BITCOIN_CHANNEL:-@BitcoinPodcastTelegram}
       AD_FREE_PRICE_SATS: ${AD_FREE_PRICE_SATS:-20000}
       AD_FREE_PAYEE: ${AD_FREE_PAYEE:-@AlanBimbati}
@@ -28,6 +28,25 @@ services:
       DB_PATH: /data/bot_cache.sqlite3
       COOKIES_FILE: /data/cookies.txt
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-2146435072}
+      MOVED_TO: ${MOVED_TO:-}
+      HANDOFF_DB: ${HANDOFF_DB:-}
+    volumes:
+      - ytdownloader-data:/data
+
+  # @OrtixifyBot. Same /data volume: cookies are shared, each bot keeps its own database.
+  ortixify-bot:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - telegram-bot-api
+    profiles: ["ortixify"]
+    environment:
+      <<: *bot-env
+      BOT_TOKEN: ${ORTIXIFY_BOT_TOKEN}
+      DB_PATH: /data/ortixify.sqlite3
+      BITCOIN_HUB: ${BITCOIN_HUB:-}
+      MOVED_TO: ""
+      HANDOFF_DB: ""
     volumes:
       - ytdownloader-data:/data
 
