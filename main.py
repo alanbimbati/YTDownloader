@@ -1781,21 +1781,85 @@ def handle_ad_free_admin(message: types.Message) -> None:
         removed = storage.revoke_ad_free(DB_PATH, target_id)
         bot.reply_to(message, f"Pubblicità riattivata per {target_id}." if removed else "Non era sbloccato.")
 
-@bot.message_handler(commands=["start", "help"])
+HELP_TEXT = (
+    "ℹ️ Cosa so fare\n\n"
+    "🎬 Video e audio\n"
+    "Mandami un link da YouTube, TikTok, Instagram, X, Reddit, Pinterest, LinkedIn e molti altri siti: "
+    "ti mando video e audio nella qualità migliore che Telegram accetta. "
+    "Se il video è già in archivio arriva subito, senza domande.\n\n"
+    "📰 Articoli\n"
+    "Mandami il link di un articolo: lo trasformo in una pagina Telegraph pulita, senza pubblicità "
+    "né tracker, da leggere direttamente in Telegram.\n\n"
+    "🔔 Iscrizioni ai canali YouTube\n"
+    "/sub link del canale: ricevi in automatico ogni video nuovo\n"
+    "/mysubs: le tue iscrizioni\n"
+    "/unsub link del canale: togli un'iscrizione\n\n"
+    "⚙️ /impostazioni\n"
+    "La lingua dell'audio (originale, italiano, inglese, spagnolo o francese, se il video ha il doppiaggio) "
+    "e cosa ricevere: sticker, anteprima, video, audio.\n\n"
+    "👥 Gruppi e canali\n"
+    "Aggiungimi come amministratore: scarico ogni link pubblicato, senza domande e senza messaggi di errore. "
+    "Gli amministratori scelgono lingua e cosa inviare con /impostazioni.\n\n"
+    "🚫 /adfree\n"
+    "Togli la pubblicità per sempre: i tuoi download passano anche davanti nella coda.\n\n"
+    "I video nuovi sono al massimo 3 all'ora; quelli già in archivio non contano."
+)
+
+
+@bot.message_handler(commands=["start"])
 def handle_start(message: types.Message) -> None:
     if not _ensure_authorized(message):
         return
     bot.send_message(
         message.chat.id,
         _append_sponsor(
-            "Incolla un link qui (supporto Youtube, TikTok, Instagram, Pinterest, LinkedIn, Twitter/X, Reddit!) e scegli cosa scaricare.\n\n"
-            "Usa il menu in basso per gestire le iscrizioni o accedere agli strumenti extra.",
+            "👋 Mandami un link: se è un video te lo scarico, se è un articolo lo trasformo in una pagina "
+            "pulita, senza pubblicità né tracker.\n\n"
+            "Scrivi /help per vedere tutto quello che so fare.",
             limit=TEXT_LIMIT,
             for_chat=message.chat.id,
         ),
         reply_markup=main_menu_keyboard(message.from_user.id),
         reply_to_message_id=_get_msg_id(message)
     )
+
+
+@bot.message_handler(commands=["help", "aiuto"])
+def handle_help(message: types.Message) -> None:
+    if not _ensure_authorized(message):
+        return
+    private = message.chat.type == "private"
+    bot.send_message(
+        message.chat.id,
+        _append_sponsor(HELP_TEXT, limit=TEXT_LIMIT, for_chat=message.chat.id),
+        # The reply keyboard is personal: in a group it would pop up for everyone.
+        reply_markup=main_menu_keyboard(message.from_user.id) if private else None,
+        reply_to_message_id=_get_msg_id(message),
+    )
+
+
+def _publish_commands() -> None:
+    # Set from the code so every bot running it (the old one and @OrtixifyBot) shows the same menu.
+    private = [
+        ("start", "Inizia"),
+        ("help", "Tutto quello che so fare"),
+        ("impostazioni", "Lingua dell'audio e cosa ricevere"),
+        ("sub", "Iscriviti a un canale YouTube"),
+        ("mysubs", "Le tue iscrizioni"),
+        ("unsub", "Togli un'iscrizione"),
+        ("adfree", "Togli la pubblicità"),
+    ]
+    groups = [("help", "Tutto quello che so fare"), ("impostazioni", "Cosa invio qui (solo amministratori)")]
+    try:
+        for commands, scope in (
+            (private, types.BotCommandScopeDefault()),
+            (private, types.BotCommandScopeAllPrivateChats()),
+            (groups, types.BotCommandScopeAllGroupChats()),
+        ):
+            bot.set_my_commands([types.BotCommand(c, d) for c, d in commands], scope=scope)
+    except Exception as e:
+        print(f"Menu dei comandi non aggiornato: {e}")
+
 
 @bot.message_handler(func=lambda m: m.text == "➕ Nuova Iscrizione")
 def handle_btn_new_sub(message: types.Message) -> None:
@@ -2727,4 +2791,5 @@ sponsor_thread = threading.Thread(target=watch_sponsor_deadlines, daemon=True)
 sponsor_thread.start()
 
 print("Bot partito...")
+_publish_commands()
 bot.infinity_polling(skip_pending=True)
