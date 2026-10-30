@@ -16,9 +16,17 @@ MIN_TEXT_CHARS = 400
 CONTENT_LIMIT = 60_000
 
 _TRACKING_PARAM = re.compile(
-    r"^(utm_\w+|fbclid|gclid|dclid|gbraid|wbraid|msclkid|mc_cid|mc_eid|igshid|yclid|_hsenc|_hsmi|ref_src|si)$",
+    r"^(utm_\w+|fbclid|gclid|dclid|gbraid|wbraid|msclkid|mc_cid|mc_eid|igshid|igsh|yclid|_hsenc|_hsmi"
+    r"|ref_src|ref_url|si|feature|pp|_ga|_gl|spm|scm|share_id|mibextid|rdt|rcm|trk|trackingId)$",
     re.IGNORECASE,
 )
+# Parameters that only track on these hosts: elsewhere `t` is a timestamp, `s` a search.
+_HOST_TRACKING = {"x.com": {"s", "t"}, "twitter.com": {"s", "t"}, "tiktok.com": {"is_from_webapp", "sender_device", "_r", "_t"}}
+_SHORTENERS = {
+    "bit.ly", "t.co", "amzn.to", "amzn.eu", "a.co", "tinyurl.com", "goo.gl", "ow.ly", "buff.ly",
+    "is.gd", "rebrand.ly", "cutt.ly", "shorturl.at", "s.id", "tiny.cc", "t.ly", "vm.tiktok.com",
+}
+_AMAZON_ITEM = re.compile(r"/(?:dp|gp/product|gp/aw/d)/([A-Z0-9]{10})", re.IGNORECASE)
 _TELEGRAPH_TAGS = {
     "a", "aside", "b", "blockquote", "br", "code", "em", "figcaption", "figure", "h3", "h4",
     "hr", "i", "img", "li", "ol", "p", "pre", "s", "strong", "u", "ul",
@@ -37,8 +45,32 @@ class Article(NamedTuple):
 
 def clean_url(url: str) -> str:
     parts = urlsplit(url)
-    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if not _TRACKING_PARAM.match(k)]
+    host = site_of(url)
+    # An Amazon item is fully named by its ASIN: the rest of the path and query is referral and affiliate tagging.
+    item = _AMAZON_ITEM.search(parts.path) if re.match(r"amazon\.[a-z.]+$", host) else None
+    if item:
+        return f"https://{parts.hostname}/dp/{item.group(1).upper()}"
+    extra = next((v for h, v in _HOST_TRACKING.items() if host == h or host.endswith("." + h)), set())
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+             if not _TRACKING_PARAM.match(k) and k not in extra]
     return urlunsplit(parts._replace(query=urlencode(query), fragment=""))
+
+
+def has_trackers(url: str) -> bool:
+    parts = urlsplit(url)
+    same = urlunsplit(parts._replace(query=urlencode(parse_qsl(parts.query, keep_blank_values=True)), fragment=""))
+    return clean_url(url) != same
+
+
+def expand(url: str) -> str:
+    """Where a shortened link really leads; any other link, or one that cannot be followed, is returned as is."""
+    if site_of(url) not in _SHORTENERS:
+        return url
+    try:
+        resp = requests.head(url, headers={"User-Agent": USER_AGENT}, allow_redirects=True, timeout=10)
+        return resp.url or url
+    except requests.RequestException:
+        return url
 
 
 def site_of(url: str) -> str:

@@ -167,12 +167,21 @@ def _append_sponsor(text: str, *, limit: int, for_chat: Optional[int] = None) ->
     return combined
 
 
+def _sponsor_tail(for_chat: Any, limit: int = SPONSOR_BLOCK_MAX) -> str:
+    sponsor = "" if _is_ad_free(for_chat) else _sponsor_block(min(SPONSOR_BLOCK_MAX, limit))
+    return "\n\n".join(p for p in (_moved_notice(), sponsor) if p)
+
+
+def _with_sponsor_html(text: str, for_chat: Any) -> str:
+    tail = _sponsor_tail(for_chat)
+    return f"{text}\n\n{html.escape(tail, quote=False)}" if tail else text
+
+
 def _media_caption(text: str, *, for_chat: Optional[int] = None, source_url: str = "",
                    limit: int = CAPTION_LIMIT) -> str:
     """HTML: the video title can contain < > &, so it is escaped before the link is added."""
     source = f'<a href="{html.escape(source_url, quote=True)}">Fonte</a>' if source_url else ""
-    sponsor = "" if _is_ad_free(for_chat) else _sponsor_block(min(SPONSOR_BLOCK_MAX, limit))
-    sponsor = "\n\n".join(p for p in (_moved_notice(), sponsor) if p)
+    sponsor = _sponsor_tail(for_chat, limit)
 
     # Telegram's limit counts the visible text, not the tags.
     tail = ("\n\nFonte" if source else "") + (f"\n\n{sponsor}" if sponsor else "")
@@ -1791,7 +1800,8 @@ HELP_TEXT = (
     "Se il video è già in archivio arriva subito, senza domande.\n\n"
     "📰 Articoli\n"
     "Mandami il link di un articolo: lo trasformo in una pagina Telegraph pulita, senza pubblicità "
-    "né tracker, da leggere direttamente in Telegram.\n\n"
+    "né tracker, da leggere direttamente in Telegram. Gli altri link (negozi, link accorciati…) "
+    "te li restituisco senza tracciamento, mostrando dove portano davvero.\n\n"
     "🔔 Iscrizioni ai canali YouTube\n"
     "/sub link del canale: ricevi in automatico ogni video nuovo\n"
     "/mysubs: le tue iscrizioni\n"
@@ -2294,7 +2304,15 @@ def _is_hub(chat: types.Chat) -> bool:
     return BITCOIN_HUB.lower() in (str(chat.id), username)
 
 
-def _send_article(message: types.Message, url: str) -> None:
+def _send_clean_link(message: types.Message, url: str) -> None:
+    text = f'🔗 Link senza tracciamento:\n{html.escape(url, quote=False)}'
+    msg_id = _get_msg_id(message)
+    bot.send_message(message.chat.id, _with_sponsor_html(text, message.chat.id), parse_mode="HTML",
+                     disable_web_page_preview=True,
+                     reply_to_message_id=msg_id if msg_id and msg_id > 0 else None)
+
+
+def _send_article(message: types.Message, url: str, shortened: bool = False) -> None:
     in_group = message.chat.type != "private"
     source = articles.clean_url(url)
     try:
@@ -2304,10 +2322,14 @@ def _send_article(message: types.Message, url: str) -> None:
         else:
             article = articles.fetch_article(url)
             if not article:
-                # Not an article: in a group it may still be a video on a site yt-dlp handles generically.
+                # Not an article (a shop, a profile…): still worth handing back without its trackers.
+                cleaned = shortened or articles.has_trackers(url)
+                if cleaned:
+                    _send_clean_link(message, source)
                 if in_group:
+                    # It may also be a video on a site yt-dlp handles generically.
                     _route_video(message, url)
-                else:
+                elif not cleaned:
                     bot.reply_to(message, "Da questo link non riesco a ricavare né un articolo né un video.")
                 return
             telegraph_url = articles.create_page(_telegraph_token(), article, source)
@@ -2319,14 +2341,12 @@ def _send_article(message: types.Message, url: str) -> None:
             f'<a href="{html.escape(telegraph_url)}">{html.escape(title, quote=False)}</a>\n\n'
             f'via <a href="{html.escape(source)}">{html.escape(articles.site_of(source))}</a>'
         )
-        if MOVED_TO:
-            text += f"\n\n{html.escape(_moved_notice(), quote=False)}"
         msg_id = _get_msg_id(message)
-        bot.send_message(message.chat.id, text, parse_mode="HTML",
+        bot.send_message(message.chat.id, _with_sponsor_html(text, message.chat.id), parse_mode="HTML",
                          reply_to_message_id=msg_id if msg_id and msg_id > 0 else None)
         # Bitcoin articles always reach the hub as well, once each, unless they were posted there.
         if is_bitcoin and BITCOIN_HUB and not _is_hub(message.chat) and storage.claim_article_for_hub(DB_PATH, source):
-            bot.send_message(BITCOIN_HUB, text, parse_mode="HTML")
+            bot.send_message(BITCOIN_HUB, _with_sponsor_html(text, BITCOIN_HUB), parse_mode="HTML")
     except Exception as e:
         print(f"Articolo non convertito ({url}): {e}")
         if not in_group:
@@ -2353,10 +2373,13 @@ def handle_download(message: types.Message) -> None:
 
 
 def _route_link(message: types.Message, url: str) -> None:
+    # A shortened link hides where it leads, and whether it is a video at all.
+    expanded = articles.expand(url)
+    shortened, url = expanded != url, expanded
     if _is_supported_url(url) or _url_temp_id(url) is not None:
         _route_video(message, url)
     elif storage.get_chat_settings(DB_PATH, message.chat.id)["articles"]:
-        threading.Thread(target=_send_article, args=(message, url), daemon=True).start()
+        threading.Thread(target=_send_article, args=(message, url, shortened), daemon=True).start()
     elif message.chat.type != "private":
         # Articles turned off here: the link may still be a video on a site yt-dlp handles generically.
         _route_video(message, url)
