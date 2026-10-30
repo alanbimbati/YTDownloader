@@ -15,6 +15,7 @@ import telebot
 import yt_dlp
 from telebot import apihelper, types
 
+import articles
 import storage
 from config import (
     AD_FREE_PAYEE,
@@ -23,6 +24,7 @@ from config import (
     ADMIN_USER_ID,
     API_BASE_URL,
     BITCOIN_CHANNEL,
+    BITCOIN_HUB,
     BOT_TOKEN,
     COOKIES_FILE,
     DB_PATH,
@@ -424,28 +426,9 @@ def _extract_supported_url(text: str) -> Optional[str]:
     return None
 
 
-def _message_url(message: types.Message) -> Optional[str]:
-    text = message.text or message.caption or ""
-    if text.startswith("/"):
-        return None
-
-    found = _extract_supported_url(text)
-    if found:
-        return found
-
-    # Link nascosto dietro un testo formattato (tipico dei messaggi inoltrati).
-    for ent in list(message.entities or []) + list(message.caption_entities or []):
-        url = getattr(ent, "url", "") or ""
-        if url and _is_supported_url(url):
-            return url
-    return None
-
-
 def _link_for(message: types.Message) -> Optional[str]:
-    if message.chat.type == "private":
-        return _message_url(message)
-    # In groups any link is tried: yt-dlp knows far more sites than the listed ones,
-    # and a link that is not a video fails silently.
+    # Any link is taken: a video goes to yt-dlp, which knows far more sites than the listed ones,
+    # and anything else is read as an article.
     text = message.text or message.caption or ""
     if text.startswith("/"):
         return None
@@ -2218,14 +2201,66 @@ def _media_mode(chat_id: int) -> Optional[str]:
     return "V" if show["video"] else "A" if show["audio"] else None
 
 
+_telegraph_guard = threading.Lock()
+
+
+def _telegraph_token() -> str:
+    with _telegraph_guard:
+        token = storage.get_kv(DB_PATH, "telegraph_token")
+        if not token:
+            token = articles.create_account("YTDownloader")
+            storage.set_kv(DB_PATH, "telegraph_token", token)
+        return token
+
+
+def _is_hub(chat: types.Chat) -> bool:
+    username = f"@{chat.username}".lower() if getattr(chat, "username", None) else ""
+    return BITCOIN_HUB.lower() in (str(chat.id), username)
+
+
+def _send_article(message: types.Message, url: str) -> None:
+    in_group = message.chat.type != "private"
+    source = articles.clean_url(url)
+    try:
+        known = storage.get_article(DB_PATH, source)
+        if known:
+            telegraph_url, title, is_bitcoin = known
+        else:
+            article = articles.fetch_article(url)
+            if not article:
+                # Not an article: in a group it may still be a video on a site yt-dlp handles generically.
+                if in_group:
+                    _route_video(message, url)
+                else:
+                    bot.reply_to(message, "Da questo link non riesco a ricavare né un articolo né un video.")
+                return
+            telegraph_url = articles.create_page(_telegraph_token(), article, source)
+            title = article.title
+            is_bitcoin = bool(_BITCOIN_RE.search(f"{article.title}\n{article.text}"))
+            storage.save_article(DB_PATH, source, telegraph_url, title, is_bitcoin)
+
+        text = (
+            f'<a href="{html.escape(telegraph_url)}">{html.escape(title, quote=False)}</a>\n\n'
+            f'via <a href="{html.escape(source)}">{html.escape(articles.site_of(source))}</a>'
+        )
+        msg_id = _get_msg_id(message)
+        bot.send_message(message.chat.id, text, parse_mode="HTML",
+                         reply_to_message_id=msg_id if msg_id and msg_id > 0 else None)
+        # Bitcoin articles always reach the hub as well, once each, unless they were posted there.
+        if is_bitcoin and BITCOIN_HUB and not _is_hub(message.chat) and storage.claim_article_for_hub(DB_PATH, source):
+            bot.send_message(BITCOIN_HUB, text, parse_mode="HTML")
+    except Exception as e:
+        print(f"Articolo non convertito ({url}): {e}")
+        if not in_group:
+            bot.reply_to(message, "Non riesco a leggere questo articolo.")
+
+
 @bot.channel_post_handler(
     content_types=["text", "photo", "video", "animation", "document"],
     func=lambda m: _link_for(m) is not None,
 )
 def handle_channel_download(message: types.Message) -> None:
-    mode = _media_mode(message.chat.id)
-    if mode:
-        download_queue.put(DownloadTask(message, _link_for(message), mode))
+    _route_link(message, _link_for(message))
 
 
 @bot.message_handler(
@@ -2236,7 +2271,17 @@ def handle_download(message: types.Message) -> None:
     if not _ensure_authorized(message):
         return
 
-    url = _link_for(message)
+    _route_link(message, _link_for(message))
+
+
+def _route_link(message: types.Message, url: str) -> None:
+    if _is_supported_url(url) or _url_temp_id(url) is not None:
+        _route_video(message, url)
+    else:
+        threading.Thread(target=_send_article, args=(message, url), daemon=True).start()
+
+
+def _route_video(message: types.Message, url: str) -> None:
     # In groups everything is downloaded without asking: whoever posts a link wants it there, not in private.
     mode = _media_mode(message.chat.id)
     if message.chat.type != "private":

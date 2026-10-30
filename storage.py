@@ -109,6 +109,26 @@ def init_db(db_path: str) -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS kv (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS articles (
+                url TEXT PRIMARY KEY,
+                telegraph_url TEXT NOT NULL,
+                title TEXT NOT NULL,
+                is_bitcoin INTEGER NOT NULL,
+                hub_sent INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS chat_settings (
                 chat_id INTEGER PRIMARY KEY,
                 sticker INTEGER NOT NULL,
@@ -527,6 +547,43 @@ def toggle_chat_setting(db_path: str, chat_id: int, key: str) -> dict[str, bool]
             (chat_id, *(int(settings[k]) for k in CHAT_MEDIA_DEFAULTS)),
         )
     return settings
+
+
+def get_kv(db_path: str, key: str) -> Optional[str]:
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def set_kv(db_path: str, key: str, value: str) -> None:
+    with _connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+
+
+def get_article(db_path: str, url: str) -> Optional[tuple[str, str, bool]]:
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT telegraph_url, title, is_bitcoin FROM articles WHERE url=?", (url,)).fetchone()
+    return (row[0], row[1], bool(row[2])) if row else None
+
+
+def save_article(db_path: str, url: str, telegraph_url: str, title: str, is_bitcoin: bool) -> None:
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO articles (url, telegraph_url, title, is_bitcoin, created_at) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(url) DO NOTHING
+            """,
+            (url, telegraph_url, title, int(is_bitcoin), int(time.time())),
+        )
+
+
+def claim_article_for_hub(db_path: str, url: str) -> bool:
+    """True only the first time: the same article reaches the hub once, however often it is shared."""
+    with _connect(db_path) as conn:
+        return conn.execute("UPDATE articles SET hub_sent=1 WHERE url=? AND hub_sent=0", (url,)).rowcount == 1
 
 
 def get_cache(db_path: str, yt_id: str) -> Optional[CacheEntry]:
