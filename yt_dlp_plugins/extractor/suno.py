@@ -15,18 +15,11 @@ class SunoIE(InfoExtractor):
         if clip.get("status") != "complete":
             raise ExtractorError("This song is not finished yet", expected=True)
 
-        formats = [
-            # The page's own audio_url points at a refusal; media_urls is what the player streams.
-            {"url": m["url"], "format_id": m.get("content_type") or "audio", "ext": "m4a",
-             "vcodec": "none", "acodec": "opus" if "opus" in (m.get("content_type") or "") else None}
-            for m in clip.get("media_urls") or [] if m.get("url")
-        ]
-        if clip.get("video_url"):
-            # The video is the cover art over the song: worth it when the video and audio are both asked for.
-            formats.append({"url": clip["video_url"], "format_id": "video", "ext": "mp4",
-                            "vcodec": "h264", "acodec": "aac"})
-        if not formats:
+        # The player's own audio (media_urls) is scrambled and audio_url points at a refusal: the video,
+        # the cover art over the song, is the one plain file, and the audio is taken out of it.
+        if not clip.get("video_url"):
             raise ExtractorError("No audio is available for this song", expected=True)
+        formats = [{"url": clip["video_url"], "format_id": "mp4", "ext": "mp4", "vcodec": "h264", "acodec": "aac"}]
 
         return {
             "id": song_id,
