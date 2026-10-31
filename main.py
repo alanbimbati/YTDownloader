@@ -420,6 +420,7 @@ SUPPORTED_DOMAINS = (
     "youtube.com", "youtu.be", "tiktok.com", "instagram.com",
     "twitter.com", "x.com", "reddit.com",
     "pinterest.com", "pinterest.it", "pin.it", "linkedin.com", "lnkd.in",
+    "facebook.com", "fb.watch", "suno.com", "suno.ai", "vimeo.com", "soundcloud.com", "twitch.tv",
 )
 
 _URL_RE = re.compile(
@@ -444,19 +445,24 @@ def _extract_supported_url(text: str) -> Optional[str]:
     return None
 
 
-def _link_for(message: types.Message) -> Optional[str]:
+MAX_LINKS_PER_MESSAGE = 10
+
+
+def _links_for(message: types.Message) -> list[str]:
     # Any link is taken: a video goes to yt-dlp, which knows far more sites than the listed ones,
     # and anything else is read as an article.
     text = message.text or message.caption or ""
     if text.startswith("/"):
-        return None
+        return []
+    links = []
     for raw in _URL_RE.findall(text):
         candidate = raw.strip().rstrip(".,;:!?)]}>»\"'")
-        return candidate if candidate.lower().startswith("http") else f"https://{candidate}"
+        links.append(candidate if candidate.lower().startswith("http") else f"https://{candidate}")
+    # Links hidden behind a word (text_link) are not in the text itself.
     for ent in list(message.entities or []) + list(message.caption_entities or []):
         if getattr(ent, "url", ""):
-            return ent.url
-    return None
+            links.append(ent.url)
+    return list(dict.fromkeys(links))[:MAX_LINKS_PER_MESSAGE]
 
 
 def _user_label(user: Any) -> str:
@@ -1795,9 +1801,10 @@ def handle_ad_free_admin(message: types.Message) -> None:
 HELP_TEXT = (
     "ℹ️ Cosa so fare\n\n"
     "🎬 Video e audio\n"
-    "Mandami un link da YouTube, TikTok, Instagram, X, Reddit, Pinterest, LinkedIn e molti altri siti: "
-    "ti mando video e audio nella qualità migliore che Telegram accetta. "
-    "Se il video è già in archivio arriva subito, senza domande.\n\n"
+    "Mandami un link da YouTube, TikTok, Instagram, Facebook, X, Reddit, Pinterest, LinkedIn e molti altri siti, "
+    "o una canzone da Suno: ti mando video e audio nella qualità migliore che Telegram accetta. "
+    "Se il video è già in archivio arriva subito, senza domande. Un post di X senza video arriva come testo e foto. "
+    "Più link nello stesso messaggio vengono presi tutti.\n\n"
     "📰 Articoli\n"
     "Mandami il link di un articolo: lo trasformo in una pagina Telegraph pulita, senza pubblicità "
     "né tracker, da leggere direttamente in Telegram. Gli altri link (negozi, link accorciati…) "
@@ -2174,8 +2181,9 @@ def handle_sub_callbacks(call: types.CallbackQuery) -> None:
 
 class DownloadTask:
     def __init__(self, message: types.Message, url: str, mode: str = "B", auto_publish: bool = False,
-                 from_subscription: bool = False):
+                 from_subscription: bool = False, article_tried: bool = False):
         self.message = message
+        self.article_tried = article_tried
         self.url = url
         self.mode = mode
         self.auto_publish = auto_publish
@@ -2312,7 +2320,58 @@ def _send_clean_link(message: types.Message, url: str) -> None:
                      reply_to_message_id=msg_id if msg_id and msg_id > 0 else None)
 
 
-def _send_article(message: types.Message, url: str, shortened: bool = False) -> None:
+def _send_tweet(message: types.Message, url: str) -> bool:
+    """A post without a video: its text and photos, through fxtwitter since X answers nothing without a login."""
+    match = re.search(r"/status(?:es)?/(\d+)", url)
+    if not match:
+        return False
+    resp = requests.get(f"https://api.fxtwitter.com/status/{match.group(1)}", timeout=20,
+                        headers={"User-Agent": "OrtixifyBot"})
+    tweet = resp.json().get("tweet") if resp.ok else None
+    if not tweet:
+        return False
+    author = tweet.get("author") or {}
+    link = tweet.get("url") or url
+    head = f'<b>{html.escape(author.get("name") or "", quote=False)}</b> (@{html.escape(author.get("screen_name") or "", quote=False)})'
+    text = _with_sponsor_html(
+        f'{head}\n\n{html.escape(tweet.get("text") or "", quote=False)}\n\n<a href="{html.escape(link)}">Fonte</a>',
+        message.chat.id,
+    )
+    photos = [m["url"] for m in (tweet.get("media") or {}).get("photos") or [] if m.get("url")][:10]
+    msg_id = _get_msg_id(message)
+    reply_to = msg_id if msg_id and msg_id > 0 else None
+    # A caption holds 1024 characters, a message 4096: a long post goes as text after the photos.
+    if photos and len(re.sub(r"<[^>]+>", "", text)) <= CAPTION_LIMIT:
+        media = [types.InputMediaPhoto(p, caption=text if i == 0 else None, parse_mode="HTML") for i, p in enumerate(photos)]
+        bot.send_media_group(message.chat.id, media, reply_to_message_id=reply_to)
+    else:
+        if photos:
+            bot.send_media_group(message.chat.id, [types.InputMediaPhoto(p) for p in photos], reply_to_message_id=reply_to)
+        bot.send_message(message.chat.id, text[:TEXT_LIMIT], parse_mode="HTML", disable_web_page_preview=True,
+                         reply_to_message_id=reply_to)
+    return True
+
+
+_NO_VIDEO_RE = re.compile(r"No video could be found|Unsupported URL|There'?s no video|No media found|"
+                          r"Requested format is not available|no suitable formats", re.IGNORECASE)
+
+
+def _without_video(message: types.Message, url: str, error: Exception) -> bool:
+    """What a link with no video still has to give: a post's text and photos, an article, a clean link."""
+    if not _NO_VIDEO_RE.search(str(error)):
+        return False
+    try:
+        if re.search(r"(?://|\.)(?:x|twitter)\.com/", url) and _send_tweet(message, url):
+            return True
+    except Exception as e:
+        print(f"Post non letto ({url}): {e}")
+    if storage.get_chat_settings(DB_PATH, message.chat.id)["articles"]:
+        _send_article(message, url, video_tried=True)
+        return True
+    return False
+
+
+def _send_article(message: types.Message, url: str, shortened: bool = False, video_tried: bool = False) -> None:
     in_group = message.chat.type != "private"
     source = articles.clean_url(url)
     try:
@@ -2326,10 +2385,10 @@ def _send_article(message: types.Message, url: str, shortened: bool = False) -> 
                 cleaned = shortened or articles.has_trackers(url)
                 if cleaned:
                     _send_clean_link(message, source)
-                if in_group:
+                if in_group and not video_tried:
                     # It may also be a video on a site yt-dlp handles generically.
-                    _route_video(message, url)
-                elif not cleaned:
+                    _route_video(message, url, article_tried=True)
+                elif not cleaned and not in_group:
                     bot.reply_to(message, "Da questo link non riesco a ricavare né un articolo né un video.")
                 return
             telegraph_url = articles.create_page(_telegraph_token(), article, source)
@@ -2355,21 +2414,23 @@ def _send_article(message: types.Message, url: str, shortened: bool = False) -> 
 
 @bot.channel_post_handler(
     content_types=["text", "photo", "video", "animation", "document"],
-    func=lambda m: _link_for(m) is not None,
+    func=lambda m: bool(_links_for(m)),
 )
 def handle_channel_download(message: types.Message) -> None:
-    _route_link(message, _link_for(message))
+    for url in _links_for(message):
+        _route_link(message, url)
 
 
 @bot.message_handler(
     content_types=["text", "photo", "video", "animation", "document"],
-    func=lambda m: _link_for(m) is not None,
+    func=lambda m: bool(_links_for(m)),
 )
 def handle_download(message: types.Message) -> None:
     if not _ensure_authorized(message):
         return
 
-    _route_link(message, _link_for(message))
+    for url in _links_for(message):
+        _route_link(message, url)
 
 
 def _route_link(message: types.Message, url: str) -> None:
@@ -2387,12 +2448,12 @@ def _route_link(message: types.Message, url: str) -> None:
         bot.reply_to(message, "Gli articoli sono spenti in ⚙️ Impostazioni: riaccendili per riceverli puliti.")
 
 
-def _route_video(message: types.Message, url: str) -> None:
+def _route_video(message: types.Message, url: str, article_tried: bool = False) -> None:
     # In groups everything is downloaded without asking: whoever posts a link wants it there, not in private.
     mode = _media_mode(message.chat.id)
     if message.chat.type != "private":
         if mode:
-            download_queue.put(DownloadTask(message, url, mode))
+            download_queue.put(DownloadTask(message, url, mode, article_tried=article_tried))
         return
     if not mode:
         bot.reply_to(message, "Hai spento sia il video sia l'audio in ⚙️ Impostazioni: riaccendine almeno uno.")
@@ -2675,8 +2736,10 @@ def _process_download(task: DownloadTask) -> None:
             bot.delete_message(message.chat.id, status.message_id)
 
     except Exception as e:
+        if not task.from_subscription and not task.article_tried and _without_video(message, url, e):
+            return
         msg_id = _get_msg_id(message)
-        text = f"Errore: {e}"
+        text = f"Errore: {str(e).removeprefix('ERROR: ')}"
         if "confirm you" in str(e) and "not a bot" in str(e):
             _alert_bot_check()
             text = "YouTube sta bloccando i download dal server (verifica anti-bot). L'amministratore è avvisato: riprova più tardi."

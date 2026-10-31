@@ -8,6 +8,12 @@ import lxml.html
 import requests
 from readability import Document
 
+try:
+    # A browser's TLS fingerprint: sites behind Cloudflare and the like refuse plain requests with a 403.
+    from curl_cffi import requests as browser
+except ImportError:
+    browser = None
+
 TELEGRAPH_API = "https://api.telegra.ph"
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
 # Below this a page is a home, a gallery or a paywall teaser, not an article worth reading elsewhere.
@@ -25,6 +31,12 @@ _HOST_TRACKING = {"x.com": {"s", "t"}, "twitter.com": {"s", "t"}, "tiktok.com": 
 _SHORTENERS = {
     "bit.ly", "t.co", "amzn.to", "amzn.eu", "a.co", "tinyurl.com", "goo.gl", "ow.ly", "buff.ly",
     "is.gd", "rebrand.ly", "cutt.ly", "shorturl.at", "s.id", "tiny.cc", "t.ly", "vm.tiktok.com",
+}
+# Pages that only bounce to another site, carrying it in a parameter, with a tracking token next to it.
+_REDIRECTORS = {
+    "linkedin.com": ("/safety/go", "url"), "l.facebook.com": ("/l.php", "u"), "lm.facebook.com": ("/l.php", "u"),
+    "l.instagram.com": ("/", "u"), "google.com": ("/url", "q"), "youtube.com": ("/redirect", "q"),
+    "l.threads.net": ("/", "u"), "out.reddit.com": ("/", "url"),
 }
 _AMAZON_ITEM = re.compile(r"/(?:dp|gp/product|gp/aw/d)/([A-Z0-9]{10})", re.IGNORECASE)
 _TELEGRAPH_TAGS = {
@@ -62,15 +74,34 @@ def has_trackers(url: str) -> bool:
     return clean_url(url) != same
 
 
+def _unwrap(url: str) -> str:
+    parts = urlsplit(url)
+    host = site_of(url)
+    for redirector, (path, param) in _REDIRECTORS.items():
+        if host == redirector and parts.path.rstrip("/").startswith(path.rstrip("/")):
+            target = dict(parse_qsl(parts.query)).get(param, "")
+            if target.startswith("http"):
+                return target
+    return url
+
+
 def expand(url: str) -> str:
-    """Where a shortened link really leads; any other link, or one that cannot be followed, is returned as is."""
+    """Where a shortened or bouncing link really leads; any other link, or one that cannot be followed, as is."""
+    url = _unwrap(url)
     if site_of(url) not in _SHORTENERS:
         return url
     try:
         resp = requests.head(url, headers={"User-Agent": USER_AGENT}, allow_redirects=True, timeout=10)
-        return resp.url or url
+        return _unwrap(resp.url or url)
     except requests.RequestException:
         return url
+
+
+def _fetch(url: str):
+    headers = {"User-Agent": USER_AGENT, "Accept-Language": "it,en;q=0.8"}
+    if browser is not None:
+        return browser.get(url, headers={"Accept-Language": headers["Accept-Language"]}, impersonate="chrome", timeout=20)
+    return requests.get(url, headers=headers, timeout=20)
 
 
 def site_of(url: str) -> str:
@@ -124,7 +155,7 @@ def _fit(nodes: list, url: str) -> list:
 
 
 def fetch_article(url: str) -> Optional[Article]:
-    resp = requests.get(url, headers={"User-Agent": USER_AGENT, "Accept-Language": "it,en;q=0.8"}, timeout=20)
+    resp = _fetch(url)
     resp.raise_for_status()
     if "html" not in resp.headers.get("content-type", ""):
         return None
