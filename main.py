@@ -1965,6 +1965,30 @@ def _report_view(period: str) -> tuple[str, types.InlineKeyboardMarkup]:
     return "\n".join(lines), kb
 
 
+def _log_error(kind: str, url: str, error: Exception, chat_type: str = "") -> None:
+    # Kept to be worked through later: most of these never reach anyone, groups fail silently.
+    try:
+        storage.log_error(DB_PATH, kind, url, str(error).removeprefix("ERROR: "), chat_type)
+    except Exception as e:
+        print(f"Errore non registrato: {e}")
+
+
+@bot.message_handler(commands=["errori"])
+def handle_errors(message: types.Message) -> None:
+    if message.from_user.id != ADMIN_USER_ID:
+        return
+    rows = storage.recent_errors(DB_PATH)
+    if not rows:
+        bot.reply_to(message, "Nessun errore registrato.")
+        return
+    lines = [
+        f"<b>{kind}</b> ×{count} · {time.strftime('%d/%m %H:%M', time.localtime(last))}"
+        f"{' · ' + chat_type if chat_type else ''}\n{html.escape(url[:120], quote=False)}\n<i>{html.escape(err[:200], quote=False)}</i>"
+        for kind, url, err, chat_type, count, last in rows
+    ]
+    bot.send_message(message.chat.id, "\n\n".join(lines)[:TEXT_LIMIT], parse_mode="HTML", disable_web_page_preview=True)
+
+
 @bot.message_handler(commands=["report"])
 def handle_report(message: types.Message) -> None:
     if message.from_user.id != ADMIN_USER_ID:
@@ -2365,6 +2389,7 @@ def _without_video(message: types.Message, url: str, error: Exception) -> bool:
             return True
     except Exception as e:
         print(f"Post non letto ({url}): {e}")
+        _log_error("tweet", url, e, message.chat.type)
     if storage.get_chat_settings(DB_PATH, message.chat.id)["articles"]:
         _send_article(message, url, video_tried=True)
         return True
@@ -2408,6 +2433,7 @@ def _send_article(message: types.Message, url: str, shortened: bool = False, vid
             bot.send_message(BITCOIN_HUB, _with_sponsor_html(text, BITCOIN_HUB), parse_mode="HTML")
     except Exception as e:
         print(f"Articolo non convertito ({url}): {e}")
+        _log_error("article", url, e, message.chat.type)
         if not in_group:
             bot.reply_to(message, "Non riesco a leggere questo articolo.")
 
@@ -2745,6 +2771,7 @@ def _process_download(task: DownloadTask) -> None:
     except Exception as e:
         if not task.from_subscription and not task.article_tried and _without_video(message, url, e):
             return
+        _log_error("subscription" if task.from_subscription else "download", url, e, message.chat.type)
         msg_id = _get_msg_id(message)
         text = f"Errore: {str(e).removeprefix('ERROR: ')}"
         if "confirm you" in str(e) and "not a bot" in str(e):
@@ -2840,6 +2867,7 @@ def poll_subscriptions():
                         notify_subscribers(channel_url, f"https://www.youtube.com/watch?v={vid}", c_title)
                 except Exception as e:
                     print(f"Errore polling canale {channel_url}: {e}")
+                    _log_error("polling", channel_url, e)
         except Exception as e:
             print(f"Errore generico polling thread: {e}")
 

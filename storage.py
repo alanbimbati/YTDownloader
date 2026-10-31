@@ -109,6 +109,20 @@ def init_db(db_path: str) -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS errors (
+                kind TEXT NOT NULL,
+                url TEXT NOT NULL,
+                error TEXT NOT NULL,
+                chat_type TEXT NOT NULL DEFAULT '',
+                count INTEGER NOT NULL DEFAULT 1,
+                first_seen INTEGER NOT NULL,
+                last_seen INTEGER NOT NULL,
+                PRIMARY KEY (kind, url, error)
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS kv (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -559,6 +573,29 @@ def get_kv(db_path: str, key: str) -> Optional[str]:
     with _connect(db_path) as conn:
         row = conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
     return row[0] if row else None
+
+
+def log_error(db_path: str, kind: str, url: str, error: str, chat_type: str = "") -> None:
+    # The same failure repeats (a subscription polled every few minutes): one row with a count, not a flood.
+    error = " ".join(str(error).split())[:500]
+    now = int(time.time())
+    with _connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO errors (kind, url, error, chat_type, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(kind, url, error) DO UPDATE SET count = count + 1, last_seen = excluded.last_seen,
+                chat_type = excluded.chat_type
+            """,
+            (kind, url or "", error, chat_type or "", now, now),
+        )
+
+
+def recent_errors(db_path: str, limit: int = 15) -> list[tuple]:
+    with _connect(db_path) as conn:
+        return conn.execute(
+            "SELECT kind, url, error, chat_type, count, last_seen FROM errors ORDER BY last_seen DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
 
 
 def set_kv(db_path: str, key: str, value: str) -> None:
