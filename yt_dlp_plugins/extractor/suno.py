@@ -18,7 +18,8 @@ class SunoIE(InfoExtractor):
         # The player's own audio (media_urls) is scrambled and audio_url points at a refusal: the video,
         # the cover art over the song, is the one plain file, and the audio is taken out of it.
         if not clip.get("video_url"):
-            raise ExtractorError("No audio is available for this song", expected=True)
+            # Shown to the user as is.
+            raise ExtractorError("Questa canzone Suno non è pubblica: Suno non ne dà un file scaricabile.", expected=True)
         formats = [{"url": clip["video_url"], "format_id": "mp4", "ext": "mp4", "vcodec": "h264", "acodec": "aac"}]
 
         return {

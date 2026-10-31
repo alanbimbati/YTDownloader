@@ -2448,9 +2448,16 @@ def _route_link(message: types.Message, url: str) -> None:
         bot.reply_to(message, "Gli articoli sono spenti in ⚙️ Impostazioni: riaccendili per riceverli puliti.")
 
 
+def _mode_for(chat_id: int, url: str) -> Optional[str]:
+    # Suno is music: its video is only the cover art standing still.
+    if re.search(r"(?://|\.)suno\.(?:com|ai)/", url):
+        return "A"
+    return _media_mode(chat_id)
+
+
 def _route_video(message: types.Message, url: str, article_tried: bool = False) -> None:
     # In groups everything is downloaded without asking: whoever posts a link wants it there, not in private.
-    mode = _media_mode(message.chat.id)
+    mode = _mode_for(message.chat.id, url)
     if message.chat.type != "private":
         if mode:
             download_queue.put(DownloadTask(message, url, mode, article_tried=article_tried))
