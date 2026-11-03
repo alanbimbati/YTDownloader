@@ -222,8 +222,21 @@ def _get_msg_id(m: Any) -> Optional[int]:
     return getattr(m, "message_id", None)
 
 
+# The forum topic a download goes back to, set by the worker for the task it is on. The upload helpers
+# below are shared by many callers: a thread-local spares threading the topic through each of them.
+_topic = threading.local()
+
+
+def _topic_of(message: Any) -> Optional[int]:
+    # Only in a forum: elsewhere message_thread_id names a reply thread, which sendMessage refuses.
+    return getattr(message, "message_thread_id", None) if getattr(message, "is_topic_message", False) else None
+
+
 def _tg_post(method: str, data: dict, files: Optional[dict] = None, *, timeout_s: int) -> dict:
     url = f"{TG_API_BASE}/{method}"
+    target = getattr(_topic, "value", None)
+    if target and str(data.get("chat_id")) == str(target[0]):
+        data = {**data, "message_thread_id": str(target[1])}
     resp = requests.post(url, data=data, files=files, timeout=(apihelper.CONNECT_TIMEOUT, timeout_s))
     try:
         payload = resp.json()
@@ -2573,6 +2586,9 @@ def _process_download(task: DownloadTask) -> None:
     # Everyone reads groups and channels: only the content goes there, no service messages.
     in_group = message.chat.type != "private"
     show = storage.get_chat_settings(DB_PATH, message.chat.id)
+    topic = _topic_of(message)
+    # Without it a group with topics gets everything in General, whichever topic the link was posted in.
+    _topic.value = (message.chat.id, topic) if topic else None
 
     try:
         msg_id = _get_msg_id(message)
@@ -2613,7 +2629,7 @@ def _process_download(task: DownloadTask) -> None:
             if sticker_set.stickers:
                 sticker_file_id = sticker_set.stickers[0].file_id
                 if show["sticker"]:
-                    bot.send_sticker(message.chat.id, sticker_file_id)
+                    bot.send_sticker(message.chat.id, sticker_file_id, message_thread_id=topic)
         except Exception:
             pass
 
@@ -2638,6 +2654,7 @@ def _process_download(task: DownloadTask) -> None:
                     cached["thumb_file_id"],
                     caption=_media_caption(f"📸 {title}", for_chat=message.chat.id, source_url=source_url),
                     parse_mode="HTML",
+                    message_thread_id=topic,
                 )
             if mode in ["V", "B"]:
                 try:
@@ -2647,6 +2664,7 @@ def _process_download(task: DownloadTask) -> None:
                         cached["video_file_id"],
                         caption=_media_caption(video_label + cache_tag, for_chat=message.chat.id, source_url=source_url),
                         parse_mode="HTML",
+                        message_thread_id=topic,
                     )
                 except Exception:
                     msg_video = _send_with_retry(
@@ -2655,6 +2673,7 @@ def _process_download(task: DownloadTask) -> None:
                         cached["video_file_id"],
                         caption=_media_caption(video_label + cache_tag, for_chat=message.chat.id, source_url=source_url),
                         parse_mode="HTML",
+                        message_thread_id=topic,
                     )
             if mode in ["A", "B"]:
                 msg_audio = _send_with_retry(
@@ -2663,6 +2682,7 @@ def _process_download(task: DownloadTask) -> None:
                     cached["audio_file_id"],
                     caption=_media_caption(audio_label + cache_tag, for_chat=message.chat.id, source_url=source_url),
                     parse_mode="HTML",
+                    message_thread_id=topic,
                 )
             
             storage.log_download(DB_PATH, uid, yt_id, yt_title=title, chat_id=message.chat.id,
@@ -2822,6 +2842,7 @@ def _process_download(task: DownloadTask) -> None:
                 bot.delete_message(message.chat.id, status.message_id)
             except Exception:
                 pass
+        _topic.value = None
         if lock:
             lock.release()
 
