@@ -3,7 +3,9 @@ import re
 import time
 import html
 import mimetypes
+import shutil
 import subprocess
+import tempfile
 from typing import Any, Optional
 import itertools
 import queue
@@ -34,8 +36,23 @@ from config import (
 )
 
 
-DOWNLOAD_DIR = "downloads"
+DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+# Set when the local Bot API server mounts DOWNLOAD_DIR at the same path: files are then handed over by path.
+LOCAL_FILES = os.getenv("LOCAL_FILES") == "1"
+
+
+def _clear_downloads() -> None:
+    # At start nothing is in progress: whatever is here was left by a run that died mid-download.
+    for name in os.listdir(DOWNLOAD_DIR):
+        path = os.path.join(DOWNLOAD_DIR, name)
+        try:
+            shutil.rmtree(path) if os.path.isdir(path) else os.remove(path)
+        except OSError as e:
+            print(f"Avanzo non rimosso {path}: {e}")
+
+
+_clear_downloads()
 
 
 def _ydl(opts: dict) -> yt_dlp.YoutubeDL:
@@ -219,6 +236,33 @@ def _tg_post(method: str, data: dict, files: Optional[dict] = None, *, timeout_s
     return payload["result"]
 
 
+def _send_file(method: str, field: str, data: dict, file_path: str, filename: str, mime: str, *,
+               thumb_path: Optional[str] = None, timeout_s: int) -> dict:
+    if os.path.getsize(file_path) <= 0:
+        raise ValueError(f"File vuoto: {filename}")
+    thumb_f = open(thumb_path, "rb") if thumb_path and os.path.exists(thumb_path) else None
+    files = {"thumbnail": ("thumb.jpg", thumb_f, "image/jpeg")} if thumb_f else {}
+    link_dir = None
+    try:
+        if LOCAL_FILES:
+            # requests builds a multipart body whole in memory: a 1.6 GB video took as much RAM in the bot,
+            # and again in the server, until the Pi froze. By path the server reads the file itself.
+            # The link costs no space and gives the file the name the phone proposes when saving it.
+            link_dir = tempfile.mkdtemp(prefix="send_", dir=DOWNLOAD_DIR)
+            os.chmod(link_dir, 0o755)
+            linked = os.path.join(os.path.abspath(link_dir), filename)
+            os.link(file_path, linked)
+            return _tg_post(method, {**data, field: f"file://{linked}"}, files=files or None, timeout_s=timeout_s)
+        with open(file_path, "rb") as f:
+            files[field] = (filename, f, mime)
+            return _tg_post(method, data, files=files, timeout_s=timeout_s)
+    finally:
+        if thumb_f:
+            thumb_f.close()
+        if link_dir:
+            shutil.rmtree(link_dir, ignore_errors=True)
+
+
 def _guess_mime(file_path: str, default: str) -> str:
     mt, _ = mimetypes.guess_type(file_path)
     return mt or default
@@ -246,36 +290,15 @@ def _tg_send_video_file(
     if height:
         data["height"] = str(int(height))
 
-    with open(file_path, "rb") as f:
-        if not f.read(1):
-            raise ValueError("File video vuoto (stream).")
-        f.seek(0)
-        files = {"video": (filename, f, mime)}
-        thumb_f = None
-        try:
-            if thumb_path and os.path.exists(thumb_path):
-                thumb_f = open(thumb_path, "rb")
-                files["thumbnail"] = ("thumb.jpg", thumb_f, "image/jpeg")
-            return _tg_post("sendVideo", data, files=files, timeout_s=60 * 20)
-        finally:
-            if thumb_f:
-                thumb_f.close()
+    return _send_file("sendVideo", "video", data, file_path, filename, mime, thumb_path=thumb_path, timeout_s=60 * 20)
 
 
 def _tg_send_document_file(chat_id: int, file_path: str, caption: str, title: str = "") -> dict:
     ext = os.path.splitext(file_path)[1]
     filename = f"{_safe_filename(title)}{ext}" if title else (os.path.basename(file_path) or "file.bin")
     mime = _guess_mime(file_path, "application/octet-stream")
-    with open(file_path, "rb") as f:
-        if not f.read(1):
-            raise ValueError("File documento vuoto (stream).")
-        f.seek(0)
-        return _tg_post(
-            "sendDocument",
-            {"chat_id": str(chat_id), "caption": caption, "parse_mode": "HTML"},
-            files={"document": (filename, f, mime)},
-            timeout_s=60 * 20,
-        )
+    return _send_file("sendDocument", "document", {"chat_id": str(chat_id), "caption": caption, "parse_mode": "HTML"},
+                      file_path, filename, mime, timeout_s=60 * 20)
 
 
 def _tg_send_audio_file(
@@ -298,20 +321,7 @@ def _tg_send_audio_file(
     if performer:
         data["performer"] = performer[:64]
 
-    with open(file_path, "rb") as f:
-        if not f.read(1):
-            raise ValueError("File audio vuoto (stream).")
-        f.seek(0)
-        files = {"audio": (filename, f, mime)}
-        thumb_f = None
-        try:
-            if thumb_path and os.path.exists(thumb_path):
-                thumb_f = open(thumb_path, "rb")
-                files["thumbnail"] = ("thumb.jpg", thumb_f, "image/jpeg")
-            return _tg_post("sendAudio", data, files=files, timeout_s=60 * 20)
-        finally:
-            if thumb_f:
-                thumb_f.close()
+    return _send_file("sendAudio", "audio", data, file_path, filename, mime, thumb_path=thumb_path, timeout_s=60 * 20)
 
 
 def _safe_filename(title: str, max_len: int = 60) -> str:

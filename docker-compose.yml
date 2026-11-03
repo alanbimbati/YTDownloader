@@ -10,11 +10,18 @@ services:
       TELEGRAM_LOCAL: "1"
     volumes:
       - telegram-bot-api-data:/var/lib/telegram-bot-api
+      # The bots hand their files over by path (file://): mounted at the same paths they write them to.
+      - ytdownloader-downloads:/downloads/ytdownloader
+      - ortixify-downloads:/downloads/ortixify
 
   # @MyYTDowbloaderbot: replaced by @OrtixifyBot, kept running so its users are not cut off.
   ytdownloader-bot:
     build: .
     restart: unless-stopped
+    # A download that runs away (ffmpeg on a long video) must kill this container, not starve the whole Pi
+    # into swapping until even ssh stops answering. No extra swap either: swapping is how the Pi froze.
+    mem_limit: ${BOT_MEM_LIMIT:-1g}
+    memswap_limit: ${BOT_MEM_LIMIT:-1g}
     depends_on:
       - telegram-bot-api
     environment: &bot-env
@@ -30,13 +37,18 @@ services:
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-2146435072}
       MOVED_TO: ${MOVED_TO:-}
       HANDOFF_DB: ${HANDOFF_DB:-}
+      DOWNLOAD_DIR: /downloads/ytdownloader
+      LOCAL_FILES: "1"
     volumes:
       - ytdownloader-data:/data
+      - ytdownloader-downloads:/downloads/ytdownloader
 
   # @OrtixifyBot. Same /data volume: cookies are shared, each bot keeps its own database.
   ortixify-bot:
     build: .
     restart: unless-stopped
+    mem_limit: ${BOT_MEM_LIMIT:-1g}
+    memswap_limit: ${BOT_MEM_LIMIT:-1g}
     depends_on:
       - telegram-bot-api
     profiles: ["ortixify"]
@@ -47,9 +59,13 @@ services:
       BITCOIN_HUB: ${BITCOIN_HUB:-}
       MOVED_TO: ""
       HANDOFF_DB: ""
+      DOWNLOAD_DIR: /downloads/ortixify
     volumes:
       - ytdownloader-data:/data
+      - ortixify-downloads:/downloads/ortixify
 
 volumes:
   telegram-bot-api-data:
   ytdownloader-data:
+  ytdownloader-downloads:
+  ortixify-downloads:
