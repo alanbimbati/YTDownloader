@@ -4,8 +4,8 @@ import time
 from typing import Optional, TypedDict
 
 
-# Alzarlo scarta le voci in cache prodotte da versioni precedenti (mp3 e miniature nuove).
-CACHE_FORMAT = 3
+# Raising it drops cache entries made by older versions (4: videos in full quality, no longer 360p).
+CACHE_FORMAT = 4
 
 SPONSOR_PERIOD_S = 30 * 24 * 3600
 SPONSOR_WARN_S = 7 * 24 * 3600

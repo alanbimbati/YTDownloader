@@ -1026,9 +1026,11 @@ def _format_size_or_estimate(fmt: dict, duration_s: Optional[float]) -> Optional
 def _video_quality_key(fmt: dict) -> tuple:
     height = fmt.get("height") or 0
     fps = fmt.get("fps") or 0
+    # At equal resolution H.264 wins: it plays on every Telegram client, VP9/AV1 not everywhere.
+    h264 = 1 if (fmt.get("vcodec") or "").startswith(("avc", "h264")) else 0
     tbr = fmt.get("tbr") or 0
     vbr = fmt.get("vbr") or 0
-    return (height, fps, tbr, vbr)
+    return (height, fps, h264, tbr, vbr)
 
 
 # Languages offered in ⚙️ Impostazioni; None = the video's original language.
@@ -1078,67 +1080,45 @@ def _select_video_format_under_limit(info: dict, limit_bytes: int, audio_lang: O
     # on videos with several audio languages): the chosen id is always followed by a generic fallback.
     fallback = _fallback_video_format(limit_bytes, audio_lang)
 
-    progressive = [
-        f
-        for f in formats
-        if f.get("vcodec") != "none"
-        and f.get("acodec") != "none"
-        and (f.get("ext") == "mp4")
-    ]
-    progressive_ok = [
-        f
-        for f in progressive
-        if (
-            _format_size_or_estimate(f, duration_s) is not None
-            and _format_size_or_estimate(f, duration_s) <= limit_bytes
-        )
-    ]
+    def fits(f: dict) -> bool:
+        size = _format_size_or_estimate(f, duration_s)
+        return size is not None and size <= limit_bytes
+
+    # Every container is fine: the merge remuxes into mp4. Limiting to mp4 meant YouTube's only
+    # muxed format (18, 360p) won, and nothing above 1080p, which YouTube serves only as VP9/AV1.
+    candidates: list[tuple[tuple, str]] = []
     # Formats with built-in audio carry only the original track.
-    if progressive_ok and not audio_lang:
-        best = max(progressive_ok, key=_video_quality_key)
-        return f"{best['format_id']}/{fallback}"
+    if not audio_lang:
+        candidates += [
+            (_video_quality_key(f), f["format_id"])
+            for f in formats
+            if f.get("vcodec") not in (None, "none") and f.get("acodec") not in (None, "none") and fits(f)
+        ]
 
-    video_only = [
-        f
-        for f in formats
-        if f.get("vcodec") != "none"
-        and f.get("acodec") == "none"
-        and (f.get("ext") == "mp4")
-    ]
-    audio_only = [
-        f
-        for f in formats
-        if f.get("vcodec") == "none"
-        and f.get("acodec") != "none"
-        and (f.get("ext") in {"m4a", "mp4"})
-    ]
-
-    video_only_sorted = sorted(video_only, key=_video_quality_key, reverse=True)
-    audio_only_sorted = sorted(audio_only, key=lambda f: _audio_rank(f, audio_lang), reverse=True)
-
-    for v in video_only_sorted:
+    video_only = [f for f in formats if f.get("vcodec") not in (None, "none") and f.get("acodec") == "none"]
+    # AAC before Opus only after the language: it goes into mp4 without surprises.
+    audio_only = sorted(
+        (f for f in formats if f.get("vcodec") == "none" and f.get("acodec") not in (None, "none")),
+        key=lambda f: _audio_rank(f, audio_lang)[:2] + (f.get("ext") == "m4a",) + _audio_rank(f, audio_lang)[2:],
+        reverse=True,
+    )
+    for v in video_only:
         vsize = _format_size_or_estimate(v, duration_s)
-        if vsize is None:
+        if vsize is None or vsize >= limit_bytes:
             continue
-        remaining = limit_bytes - vsize
-        if remaining <= 0:
-            continue
-        best_audio = None
-        for a in audio_only_sorted:
+        for a in audio_only:
             asize = _format_size_or_estimate(a, duration_s)
-            if asize is None:
-                continue
-            if asize <= remaining:
-                best_audio = a
+            if asize is not None and asize <= limit_bytes - vsize:
+                candidates.append((_video_quality_key(v), f"{v['format_id']}+{a['format_id']}"))
                 break
-        if best_audio:
-            return f"{v['format_id']}+{best_audio['format_id']}/{fallback}"
 
-    return fallback
+    if not candidates:
+        return fallback
+    return f"{max(candidates, key=lambda c: c[0])[1]}/{fallback}"
 
 
 def _fallback_video_format(limit_bytes: int, audio_lang: Optional[str] = None) -> str:
-    # Fallback conservativo: limita l'altezza per aumentare le chance di stare sotto il limite.
+    # Only used when sizes are unknown: capping the height keeps the odds of fitting under the limit.
     limit_mb = limit_bytes / (1024 * 1024)
     if limit_mb <= 60:
         cap = 360
@@ -1150,10 +1130,10 @@ def _fallback_video_format(limit_bytes: int, audio_lang: Optional[str] = None) -
         cap = 1080
 
     # Without a language filter yt-dlp's sorting already puts the original audio first.
-    dubbed = f"bestvideo[ext=mp4][height<={cap}]+bestaudio[ext=m4a][language^={audio_lang}]/" if audio_lang else ""
+    dubbed = f"bv*[height<={cap}]+ba[language^={audio_lang}]/" if audio_lang else ""
     return (
-        f"{dubbed}bestvideo[ext=mp4][height<={cap}]+bestaudio[ext=m4a]/"
-        f"best[ext=mp4][height<={cap}]/best[height<={cap}]"
+        f"{dubbed}bv*[height<={cap}]+ba[ext=m4a]/bv*[height<={cap}]+ba/"
+        f"b[height<={cap}]/b"
     )
 
 
@@ -1268,7 +1248,8 @@ def _download_video(url: str, yt_id: str, audio_lang: Optional[str] = None) -> t
         "max_filesize": EFFECTIVE_MAX_UPLOAD_BYTES,
     }
     with _ydl(ydl_opts) as ydl:
-        ydl.extract_info(url, download=True)
+        # Its width/height are the downloaded format's, not the preview's default.
+        info = ydl.extract_info(url, download=True) or info
     preferred = os.path.join(DOWNLOAD_DIR, f"{yt_id}_video.mp4")
     if os.path.exists(preferred):
         path = preferred
