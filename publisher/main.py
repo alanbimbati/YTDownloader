@@ -3,12 +3,16 @@ import os
 import shutil
 import time
 import traceback
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from . import config, media, post_file, texts
 from .media import Video
-from .platforms import linkedin, nostr, telegram, youtube
+from .notify import notify
+from .platforms import linkedin, nostr, youtube
 
-ORDER = ["youtube", "shorts", "linkedin", "telegram", "nostr"]
+ORDER = ["youtube", "shorts", "linkedin", "nostr"]
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 _sizes: dict[str, tuple[int, float]] = {}
 _linkedin_warned_day = ""
 
@@ -47,8 +51,7 @@ def _workdir(folder: str) -> str:
 
 
 AVAILABLE = {"youtube": lambda: youtube.available(), "shorts": lambda: youtube.available(),
-             "linkedin": lambda: linkedin.available(), "telegram": lambda: telegram.available(),
-             "nostr": lambda: nostr.available()}
+             "linkedin": lambda: linkedin.available(), "nostr": lambda: nostr.available()}
 
 
 def _applicable(horizontal: Video | None, vertical: Video | None) -> list[str]:
@@ -72,40 +75,69 @@ def prepare(folder: str, paths: list[str]) -> None:
         transcript, language = transcribe(audio)
     post_file.write_transcript(folder, transcript)
     post_file.write_state(folder, {"fase": "testi", "lingua": language})
-    written = texts.write_posts(transcript, language, post_file.read_notes(folder))
+    durations = {("vertical" if v.vertical else "horizontal"): v.duration for v in (horizontal, vertical) if v}
+    written = texts.write_posts(transcript, language, post_file.read_notes(folder), durations)
     platforms = _applicable(horizontal, vertical)
     post_file.write_post(folder, platforms, written)
     post_file.write_state(folder, {"fase": "in_approvazione", "lingua": language, "piattaforme": {}})
     found = ", ".join(f"{'verticale' if v.vertical else 'orizzontale'} {v.dim} {v.duration:.0f}s"
                       for v in (horizontal, vertical) if v)
-    telegram.notify(f"📝 {name}: testi pronti ({found}).\nControlla {name}/post.yaml e metti `pubblica: si`.\n"
+    notify(f"📝 {name}: testi pronti ({found}).\nControlla {name}/post.yaml e metti `pubblica: si`.\n"
                     f"Piattaforme: {', '.join(f'{p}' + ('' if AVAILABLE[p]() else ' (senza credenziali)') for p in platforms)}\n\n"
                     f"YouTube: {written['youtube']['title']}")
 
 
-def _publish_one(platform: str, folder: str, post: dict, language: str,
-                 horizontal: Video | None, vertical: Video | None) -> str:
+def _publish_at(post: dict) -> str:
+    when = str(post.get("programma") or "").strip()
+    if not when:
+        return ""
+    local = datetime.strptime(when, "%Y-%m-%d %H:%M").replace(tzinfo=ZoneInfo(config.TIMEZONE))
+    if local.timestamp() <= time.time() + 600:
+        return ""
+    return local.astimezone(ZoneInfo("UTC")).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _thumbnail_image(folder: str) -> str | None:
+    images = [n for n in sorted(os.listdir(folder)) if n.lower().endswith(IMAGE_EXTS) and not n.startswith(".")]
+    return media.jpeg(os.path.join(folder, images[0]), os.path.join(_workdir(folder), "miniatura.jpg")) if images else None
+
+
+def _shorts_description(description: str, long_url: str) -> str:
+    lines = [l.replace("{video_lungo}", long_url) for l in description.splitlines()
+             if long_url or "{video_lungo}" not in l]
+    return "\n".join(lines)
+
+
+def _publish_one(platform: str, folder: str, post: dict, language: str, done: dict,
+                 horizontal: Video | None, vertical: Video | None) -> tuple[str, list[str]]:
     if not AVAILABLE[platform]():
         raise RuntimeError("credenziali mancanti nel .env del Pi")
     work = _workdir(folder)
     main = horizontal or vertical
     if platform == "youtube":
         p = post["youtube"]
-        return youtube.upload(horizontal.path, p["title"], p["description"], p.get("tags") or [], language)
+        return youtube.publish(
+            horizontal.path, title=p["title"], description=p["description"], tags=p.get("tags") or [],
+            category=str(p.get("category") or "22"), language=language, publish_at=_publish_at(post),
+            srt=post_file.srt_for(folder, horizontal.duration), thumbnail=_thumbnail_image(folder),
+            playlist=str(post.get("playlist") or "").strip(),
+        )
     if platform == "shorts":
         p = post["shorts"]
-        description = p["description"] if "#shorts" in p["description"].lower() else p["description"] + "\n#Shorts"
-        return youtube.upload(vertical.path, p["title"], description, [], language)
+        title = p["title"] if "#shorts" in p["title"].lower() else f"{p['title']} #Shorts"
+        description = _shorts_description(p["description"], (done.get("youtube") or {}).get("url", ""))
+        return youtube.publish(
+            vertical.path, title=title, description=description, tags=post["youtube"].get("tags") or [],
+            category=str(post["youtube"].get("category") or "22"), language=language,
+            publish_at=_publish_at(post), srt=post_file.srt_for(folder, vertical.duration),
+        )
     if platform == "linkedin":
         path = media.shrink(main, os.path.join(work, "linkedin.mp4"), config.LINKEDIN_MAX_BYTES)
-        return linkedin.upload(path, post["linkedin"]["text"], post["youtube"]["title"])
-    if platform == "telegram":
-        path = media.shrink(main, os.path.join(work, "telegram.mp4"), config.TELEGRAM_MAX_BYTES)
-        return telegram.post_video(media.probe(path) if path != main.path else main, post["telegram"]["text"])
+        return linkedin.upload(path, post["linkedin"]["text"], post["youtube"]["title"]), []
     if platform == "nostr":
         thumb = media.thumbnail(main, os.path.join(work, "thumb.jpg"))
         upload_path = lambda v: media.shrink(v, os.path.join(work, f"nostr-{'v' if v.vertical else 'h'}.mp4"), config.BLOSSOM_MAX_BYTES)
-        return nostr.post(horizontal, vertical, post["nostr"], thumb, upload_path)
+        return nostr.post(horizontal, vertical, post["nostr"], thumb, upload_path), []
     raise ValueError(f"piattaforma sconosciuta: {platform}")
 
 
@@ -119,8 +151,10 @@ def publish(folder: str, post: dict, state: dict, paths: list[str]) -> None:
     post_file.write_state(folder, state)
     for platform in pending:
         try:
-            url = _publish_one(platform, folder, post, state.get("lingua", "it"), horizontal, vertical)
+            url, warnings = _publish_one(platform, folder, post, state.get("lingua", "it"), done, horizontal, vertical)
             done[platform] = {"url": url, "quando": time.strftime("%Y-%m-%d %H:%M")}
+            if warnings:
+                done[platform]["avvisi"] = warnings
         except Exception as e:
             traceback.print_exc()
             done[platform] = {"errore": str(e)[:500], "quando": time.strftime("%Y-%m-%d %H:%M")}
@@ -128,11 +162,12 @@ def publish(folder: str, post: dict, state: dict, paths: list[str]) -> None:
 
     failed = [p for p in pending if "errore" in done[p]]
     lines = [f"{'✅' if 'url' in done[p] else '❌'} {p}: {done[p].get('url') or done[p].get('errore')}"
+             + "".join(f"\n   ⚠️ {w}" for w in done[p].get("avvisi", []))
              for p in post.get("piattaforme") or [] if p in done]
     if failed:
         state["fase"] = "errori"
         post_file.write_state(folder, state)
-        telegram.notify(f"⚠️ {name}: pubblicazione parziale\n" + "\n".join(lines)
+        notify(f"⚠️ {name}: pubblicazione parziale\n" + "\n".join(lines)
                         + "\n\nSalva di nuovo post.yaml per riprovare solo quelle fallite.")
         return
     state["fase"] = "pubblicato"
@@ -143,7 +178,7 @@ def publish(folder: str, post: dict, state: dict, paths: list[str]) -> None:
         target += time.strftime("-%Y%m%d-%H%M%S")
     shutil.move(folder, target)
     shutil.rmtree(_workdir(folder), ignore_errors=True)
-    telegram.notify(f"🚀 {name}: pubblicato\n" + "\n".join(lines))
+    notify(f"🚀 {name}: pubblicato\n" + "\n".join(lines))
 
 
 def handle(folder: str) -> None:
@@ -169,14 +204,14 @@ def _check_linkedin_token() -> None:
     today = time.strftime("%Y-%m-%d")
     if linkedin.available() and linkedin.days_left() < 7 and _linkedin_warned_day != today:
         _linkedin_warned_day = today
-        telegram.notify(f"🔑 Il token LinkedIn scade tra {max(linkedin.days_left(), 0):.0f} giorni: "
+        notify(f"🔑 Il token LinkedIn scade tra {max(linkedin.days_left(), 0):.0f} giorni: "
                         "rifallo con `python -m publisher.auth linkedin` e aggiorna il .env sul Pi.")
 
 
 def main() -> None:
     os.makedirs(config.WORK_DIR, exist_ok=True)
     print(f"Watching {config.WATCH_DIR}; platforms: youtube={youtube.available()} linkedin={linkedin.available()} "
-          f"telegram={telegram.available()} nostr={nostr.available()}")
+          f"nostr={nostr.available()}")
     while True:
         _check_linkedin_token()
         for entry in sorted(os.listdir(config.WATCH_DIR)):
@@ -196,7 +231,7 @@ def main() -> None:
                         state["tentativo_su_post_salvato_il"] = post_file.post_mtime(folder)
                         retry = f"Salva di nuovo {entry}/post.yaml per riprovare."
                     post_file.write_state(folder, state)
-                telegram.notify(f"❌ {entry}: {e}\n{retry}")
+                notify(f"❌ {entry}: {e}\n{retry}")
         time.sleep(config.POLL_SECONDS)
 
 

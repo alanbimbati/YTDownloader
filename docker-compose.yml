@@ -13,9 +13,6 @@ services:
       # The bots hand their files over by path (file://): mounted at the same paths they write them to.
       - ytdownloader-downloads:/downloads/ytdownloader
       - ortixify-downloads:/downloads/ortixify
-      # The publisher hands its videos over the same way.
-      - ${PUBLISH_HOST_DIR:-/home/dietpi/Pubblica}:/pubblica:ro
-      - publisher-data:/data:ro
 
   # @MyYTDowbloaderbot: replaced by @OrtixifyBot, kept running so its users are not cut off.
   ytdownloader-bot:
@@ -67,7 +64,7 @@ services:
       - ytdownloader-data:/data
       - ortixify-downloads:/downloads/ortixify
 
-  # Publishes the video pairs dropped in ~/Pubblica (Syncthing) once post.yaml is approved; posts to Telegram as @OrtixifyBot.
+  # Publishes the video pairs dropped in ~/Pubblica (Syncthing) once post.yaml is approved; notifies through @OrtixifyBot.
   publisher:
     build: ./publisher
     restart: unless-stopped
@@ -83,7 +80,6 @@ services:
       ADMIN_USER_ID: ${ADMIN_USER_ID}
       API_BASE_URL: http://telegram-bot-api:8081
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      PUBLISH_TELEGRAM_CHANNEL: ${PUBLISH_TELEGRAM_CHANNEL:-}
       WHISPER_MODEL: ${WHISPER_MODEL:-base}
       YOUTUBE_CLIENT_ID: ${YOUTUBE_CLIENT_ID:-}
       YOUTUBE_CLIENT_SECRET: ${YOUTUBE_CLIENT_SECRET:-}

@@ -48,7 +48,9 @@ def youtube() -> None:
     state = secrets.token_urlsafe(16)
     url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode({
         "client_id": client_id, "redirect_uri": REDIRECT, "response_type": "code", "state": state,
-        "scope": "https://www.googleapis.com/auth/youtube.upload", "access_type": "offline", "prompt": "consent",
+        # force-ssl on top of upload: captions, thumbnails, playlists and the channel's own handle.
+        "scope": "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.force-ssl",
+        "access_type": "offline", "prompt": "consent",
     })
     code = _wait_for_code(url, state)
     r = requests.post("https://oauth2.googleapis.com/token", timeout=30, data={

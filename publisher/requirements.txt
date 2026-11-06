@@ -4,3 +4,4 @@ requests
 PyYAML
 coincurve
 websockets
+tzdata

@@ -138,11 +138,13 @@ Servizio a parte (`publisher/`, profilo compose `publisher`) che osserva `~/Pubb
 sincronizzata con Syncthing.
 
 1. Crea una cartella per video, es. `~/Pubblica/lancio-nodo/`, e mettici il video orizzontale
-   e quello verticale (nomi liberi: l'orientamento lo legge ffprobe). Facoltativo: `note.txt` con
-   indicazioni per i testi (link da mettere, tono, call to action).
+   e quello verticale (nomi liberi: l'orientamento lo legge ffprobe). Facoltativi:
+   - `note.txt`: indicazioni per i testi (link, fonti, crediti obbligatori, tono);
+   - un `.srt`: usato come trascrizione e caricato come sottotitoli sul video che dura quanto lui;
+   - un'immagine (`.jpg`/`.png`): miniatura del video lungo su YouTube.
 2. Quando i file smettono di crescere da 2 minuti, il Pi trascrive l'audio (faster-whisper,
-   primi 15 minuti) e Claude scrive i testi per ogni piattaforma in `post.yaml`. Arriva un
-   messaggio da @OrtixifyBot.
+   primi 15 minuti, saltato se c'è un `.srt`) e Claude scrive i testi per ogni piattaforma in
+   `post.yaml`. Arriva un messaggio da @OrtixifyBot.
 3. Correggi `post.yaml`, togli da `piattaforme` quelle da saltare, metti `pubblica: si` e salva.
 4. L'esito per piattaforma (link o errore) finisce in `stato.yaml`. Se tutto va bene la cartella
    si sposta in `~/Pubblica/_pubblicati/`; se qualcosa fallisce, salvare di nuovo `post.yaml`
@@ -153,10 +155,17 @@ sincronizzata con Syncthing.
 | youtube | orizzontale | |
 | shorts | verticale | solo se dura al massimo 3 minuti |
 | linkedin | orizzontale | sopra i 500MB ne fa una copia ricompressa a 1080p (lenta sul Pi) |
-| telegram | orizzontale | `PUBLISH_TELEGRAM_CHANNEL`, @OrtixifyBot deve essere admin del canale |
 | nostr | entrambi | kind 21 + kind 22 (NIP-71) e una nota kind 1, file su Blossom |
 
-Una piattaforma senza credenziali nel `.env` viene saltata. Credenziali:
+Su YouTube, per farsi trovare e seguire: titolo con la parola chiave in testa, prime righe della
+descrizione pensate per la ricerca, capitoli (video di almeno 3 minuti), 3 hashtag, 10-15 tag,
+categoria scelta da Claude, sottotitoli dal `.srt`, miniatura, link "Iscriviti" con
+`?sub_confirmation=1`, lo Short che rimanda al video lungo, e in `post.yaml` `programma`
+(uscita programmata) e `playlist`. Gli extra che falliscono (es. miniatura su un canale non
+verificato) finiscono come avvisi in `stato.yaml` senza bloccare il caricamento.
+
+Una piattaforma senza credenziali resta in `post.yaml` e fallisce con "credenziali mancanti":
+aggiunte le credenziali, salvare di nuovo `post.yaml` la ritenta. Credenziali:
 
 - **Claude**: `ANTHROPIC_API_KEY`.
 - **YouTube**: progetto Google Cloud con YouTube Data API v3, client OAuth "Desktop app",

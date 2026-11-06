@@ -16,6 +16,14 @@ HEADER = """\
 """
 
 
+OPTIONAL = """\
+# Facoltativi per YouTube: uscita programmata (ora italiana, es. 2026-11-07 18:00; vuoto = subito)
+# e id della playlist in cui aggiungere il video lungo (quello dopo list= nel link della playlist).
+programma:
+playlist:
+"""
+
+
 class _Dumper(yaml.SafeDumper):
     pass
 
@@ -38,7 +46,7 @@ def _write(path: str, text: str) -> None:
 
 
 def write_post(folder: str, platforms: list[str], texts: dict) -> None:
-    _write(os.path.join(folder, POST), HEADER + "pubblica: no\n" + _dump({"piattaforme": platforms, **texts}))
+    _write(os.path.join(folder, POST), HEADER + "pubblica: no\n" + OPTIONAL + _dump({"piattaforme": platforms, **texts}))
 
 
 def read_post(folder: str) -> dict | None:
@@ -74,14 +82,57 @@ def write_transcript(folder: str, text: str) -> None:
     _write(os.path.join(folder, TRANSCRIPT), text + "\n")
 
 
+def _seconds(stamp: str) -> float:
+    h, m, rest = stamp.strip().replace(",", ".").split(":")
+    return int(h) * 3600 + int(m) * 60 + float(rest)
+
+
+def parse_srt(path: str) -> list[tuple[float, float, str]]:
+    with open(path, encoding="utf-8-sig") as f:
+        blocks = f.read().replace("\r", "").strip().split("\n\n")
+    cues = []
+    for block in blocks:
+        lines = [l for l in block.split("\n") if l.strip()]
+        times = next((l for l in lines if "-->" in l), None)
+        if times:
+            start, end = times.split("-->")
+            cues.append((_seconds(start), _seconds(end), " ".join(lines[lines.index(times) + 1:])))
+    return cues
+
+
+def timed_lines(parts: list[tuple[float, str]], every: float = 10.0) -> str:
+    """Transcript as [m:ss] lines, so Claude can place YouTube chapters on real times."""
+    lines, current, mark = [], [], None
+    for start, text in parts:
+        if mark is None or start - mark >= every:
+            if current:
+                lines.append(f"[{int(mark // 60)}:{int(mark % 60):02d}] " + " ".join(current))
+            current, mark = [], start
+        current.append(text)
+    if current:
+        lines.append(f"[{int(mark // 60)}:{int(mark % 60):02d}] " + " ".join(current))
+    return "\n".join(lines)
+
+
+def srt_files(folder: str) -> list[str]:
+    return [os.path.join(folder, n) for n in sorted(os.listdir(folder)) if n.lower().endswith(".srt")]
+
+
+def srt_for(folder: str, duration: float) -> str | None:
+    """The .srt that belongs to a video: the one ending where the video ends."""
+    for path in srt_files(folder):
+        cues = parse_srt(path)
+        if cues and abs(cues[-1][1] - duration) <= 3:
+            return path
+    return None
+
+
 def read_subtitles(folder: str) -> tuple[str, str]:
-    """The text of an .srt next to the videos, when the editor already made one: no need to transcribe again."""
-    for name in sorted(os.listdir(folder)):
-        if name.lower().endswith(".srt"):
-            with open(os.path.join(folder, name), encoding="utf-8-sig") as f:
-                lines = [l.strip() for l in f if l.strip() and not l.strip().isdigit() and "-->" not in l]
-            return " ".join(lines), os.getenv("PUBLISH_SRT_LANGUAGE", "it")
-    return "", ""
+    """The editor's .srt, when there is one: no need to transcribe again."""
+    files = srt_files(folder)
+    if not files:
+        return "", ""
+    return timed_lines([(start, text) for start, _, text in parse_srt(files[0])]), os.getenv("PUBLISH_SRT_LANGUAGE", "it")
 
 
 def read_notes(folder: str) -> str:

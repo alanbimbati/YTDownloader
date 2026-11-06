@@ -77,3 +77,9 @@ def shrink(video: Video, out: str, max_bytes: int) -> str:
         check=True,
     )
     return out
+
+
+def jpeg(image: str, out: str) -> str:
+    """YouTube takes thumbnails up to 2MB: a 1280px JPEG always fits."""
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", image, "-vf", "scale='min(1280,iw)':-2", "-q:v", "3", out], check=True)
+    return out
