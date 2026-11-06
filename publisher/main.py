@@ -46,15 +46,18 @@ def _workdir(folder: str) -> str:
     return path
 
 
+AVAILABLE = {"youtube": lambda: youtube.available(), "shorts": lambda: youtube.available(),
+             "linkedin": lambda: linkedin.available(), "telegram": lambda: telegram.available(),
+             "nostr": lambda: nostr.available()}
+
+
 def _applicable(horizontal: Video | None, vertical: Video | None) -> list[str]:
+    # Listed even without credentials: the author sees what is missing, and a retry picks it up once added.
     wanted = {
-        "youtube": youtube.available() and horizontal is not None,
-        "shorts": youtube.available() and vertical is not None and vertical.duration <= config.SHORTS_MAX_SECONDS,
-        "linkedin": linkedin.available(),
-        "telegram": telegram.available(),
-        "nostr": nostr.available(),
+        "youtube": horizontal is not None,
+        "shorts": vertical is not None and vertical.duration <= config.SHORTS_MAX_SECONDS,
     }
-    return [p for p in ORDER if wanted[p]]
+    return [p for p in ORDER if wanted.get(p, True)]
 
 
 def prepare(folder: str, paths: list[str]) -> None:
@@ -62,9 +65,11 @@ def prepare(folder: str, paths: list[str]) -> None:
     post_file.write_state(folder, {"fase": "trascrizione"})
     horizontal, vertical = _pick(paths)
     source = horizontal or vertical
-    audio = media.extract_audio(source.path, os.path.join(_workdir(folder), "audio.wav"), config.WHISPER_MAX_SECONDS)
-    from .transcribe import transcribe  # heavy import, only when there is something to transcribe
-    transcript, language = transcribe(audio)
+    transcript, language = post_file.read_subtitles(folder)
+    if not transcript:
+        audio = media.extract_audio(source.path, os.path.join(_workdir(folder), "audio.wav"), config.WHISPER_MAX_SECONDS)
+        from .transcribe import transcribe  # heavy import, only when there is something to transcribe
+        transcript, language = transcribe(audio)
     post_file.write_transcript(folder, transcript)
     post_file.write_state(folder, {"fase": "testi", "lingua": language})
     written = texts.write_posts(transcript, language, post_file.read_notes(folder))
@@ -74,12 +79,14 @@ def prepare(folder: str, paths: list[str]) -> None:
     found = ", ".join(f"{'verticale' if v.vertical else 'orizzontale'} {v.dim} {v.duration:.0f}s"
                       for v in (horizontal, vertical) if v)
     telegram.notify(f"📝 {name}: testi pronti ({found}).\nControlla {name}/post.yaml e metti `pubblica: si`.\n"
-                    f"Piattaforme: {', '.join(platforms) or 'nessuna configurata'}\n\n"
+                    f"Piattaforme: {', '.join(f'{p}' + ('' if AVAILABLE[p]() else ' (senza credenziali)') for p in platforms)}\n\n"
                     f"YouTube: {written['youtube']['title']}")
 
 
 def _publish_one(platform: str, folder: str, post: dict, language: str,
                  horizontal: Video | None, vertical: Video | None) -> str:
+    if not AVAILABLE[platform]():
+        raise RuntimeError("credenziali mancanti nel .env del Pi")
     work = _workdir(folder)
     main = horizontal or vertical
     if platform == "youtube":

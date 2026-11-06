@@ -74,6 +74,16 @@ def write_transcript(folder: str, text: str) -> None:
     _write(os.path.join(folder, TRANSCRIPT), text + "\n")
 
 
+def read_subtitles(folder: str) -> tuple[str, str]:
+    """The text of an .srt next to the videos, when the editor already made one: no need to transcribe again."""
+    for name in sorted(os.listdir(folder)):
+        if name.lower().endswith(".srt"):
+            with open(os.path.join(folder, name), encoding="utf-8-sig") as f:
+                lines = [l.strip() for l in f if l.strip() and not l.strip().isdigit() and "-->" not in l]
+            return " ".join(lines), os.getenv("PUBLISH_SRT_LANGUAGE", "it")
+    return "", ""
+
+
 def read_notes(folder: str) -> str:
     for name in NOTES:
         path = os.path.join(folder, name)
