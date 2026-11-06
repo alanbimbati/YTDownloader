@@ -131,3 +131,41 @@ Il file si rilegge a ogni download, non serve riavviare. Quando scadono il bot a
 
 `/sub` accetta il link di un canale (`@handle`, `/channel/UC…`) o di un qualsiasi video del canale.
 Ogni 10 minuti il bot legge il feed RSS del canale e scarica i video nuovi (al massimo 3 per giro).
+
+## Publisher: un video orizzontale + uno verticale su tutte le piattaforme
+
+Servizio a parte (`publisher/`, profilo compose `publisher`) che osserva `~/Pubblica` sul Pi,
+sincronizzata con Syncthing.
+
+1. Crea una cartella per video, es. `~/Pubblica/lancio-nodo/`, e mettici il video orizzontale
+   e quello verticale (nomi liberi: l'orientamento lo legge ffprobe). Facoltativo: `note.txt` con
+   indicazioni per i testi (link da mettere, tono, call to action).
+2. Quando i file smettono di crescere da 2 minuti, il Pi trascrive l'audio (faster-whisper,
+   primi 15 minuti) e Claude scrive i testi per ogni piattaforma in `post.yaml`. Arriva un
+   messaggio da @OrtixifyBot.
+3. Correggi `post.yaml`, togli da `piattaforme` quelle da saltare, metti `pubblica: si` e salva.
+4. L'esito per piattaforma (link o errore) finisce in `stato.yaml`. Se tutto va bene la cartella
+   si sposta in `~/Pubblica/_pubblicati/`; se qualcosa fallisce, salvare di nuovo `post.yaml`
+   riprova solo le piattaforme fallite.
+
+| Piattaforma | Video | Note |
+|---|---|---|
+| youtube | orizzontale | |
+| shorts | verticale | solo se dura al massimo 3 minuti |
+| linkedin | orizzontale | sopra i 500MB ne fa una copia ricompressa a 1080p (lenta sul Pi) |
+| telegram | orizzontale | `PUBLISH_TELEGRAM_CHANNEL`, @OrtixifyBot deve essere admin del canale |
+| nostr | entrambi | kind 21 + kind 22 (NIP-71) e una nota kind 1, file su Blossom |
+
+Una piattaforma senza credenziali nel `.env` viene saltata. Credenziali:
+
+- **Claude**: `ANTHROPIC_API_KEY`.
+- **YouTube**: progetto Google Cloud con YouTube Data API v3, client OAuth "Desktop app",
+  schermata di consenso **in produzione** (in "Testing" il refresh token scade dopo 7 giorni).
+  Poi sul portatile: `python -m publisher.auth youtube`. Finché il progetto non passa l'audit
+  di Google, i video caricati via API restano **privati**.
+- **LinkedIn**: app su developer.linkedin.com con i prodotti "Sign In with LinkedIn using OpenID
+  Connect" e "Share on LinkedIn", redirect `http://localhost:8765/callback`, poi
+  `python -m publisher.auth linkedin`. Il token dura 60 giorni: il bot avvisa una settimana prima.
+- **Nostr**: `NOSTR_NSEC` (nsec o hex), `NOSTR_RELAYS`, `BLOSSOM_SERVER`.
+
+Avvio: `docker compose --profile ortixify --profile publisher up -d --build`.

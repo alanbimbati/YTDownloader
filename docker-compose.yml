@@ -13,6 +13,9 @@ services:
       # The bots hand their files over by path (file://): mounted at the same paths they write them to.
       - ytdownloader-downloads:/downloads/ytdownloader
       - ortixify-downloads:/downloads/ortixify
+      # The publisher hands its videos over the same way.
+      - ${PUBLISH_HOST_DIR:-/home/dietpi/Pubblica}:/pubblica:ro
+      - publisher-data:/data:ro
 
   # @MyYTDowbloaderbot: replaced by @OrtixifyBot, kept running so its users are not cut off.
   ytdownloader-bot:
@@ -64,7 +67,40 @@ services:
       - ytdownloader-data:/data
       - ortixify-downloads:/downloads/ortixify
 
+  # Publishes the video pairs dropped in ~/Pubblica (Syncthing) once post.yaml is approved; posts to Telegram as @OrtixifyBot.
+  publisher:
+    build: ./publisher
+    restart: unless-stopped
+    mem_limit: ${PUBLISHER_MEM_LIMIT:-1200m}
+    memswap_limit: ${PUBLISHER_MEM_LIMIT:-1200m}
+    depends_on:
+      - telegram-bot-api
+    profiles: ["publisher"]
+    # Same user as Syncthing, so the files written in the folder sync back and can be edited.
+    user: "${PUBLISH_UID:-995}:${PUBLISH_GID:-1000}"
+    environment:
+      BOT_TOKEN: ${ORTIXIFY_BOT_TOKEN}
+      ADMIN_USER_ID: ${ADMIN_USER_ID}
+      API_BASE_URL: http://telegram-bot-api:8081
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      PUBLISH_TELEGRAM_CHANNEL: ${PUBLISH_TELEGRAM_CHANNEL:-}
+      WHISPER_MODEL: ${WHISPER_MODEL:-base}
+      YOUTUBE_CLIENT_ID: ${YOUTUBE_CLIENT_ID:-}
+      YOUTUBE_CLIENT_SECRET: ${YOUTUBE_CLIENT_SECRET:-}
+      YOUTUBE_REFRESH_TOKEN: ${YOUTUBE_REFRESH_TOKEN:-}
+      YOUTUBE_PRIVACY: ${YOUTUBE_PRIVACY:-public}
+      LINKEDIN_ACCESS_TOKEN: ${LINKEDIN_ACCESS_TOKEN:-}
+      LINKEDIN_TOKEN_EXPIRES_AT: ${LINKEDIN_TOKEN_EXPIRES_AT:-0}
+      LINKEDIN_PERSON_URN: ${LINKEDIN_PERSON_URN:-}
+      NOSTR_NSEC: ${NOSTR_NSEC:-}
+      NOSTR_RELAYS: ${NOSTR_RELAYS:-wss://relay.damus.io,wss://nos.lol,wss://relay.primal.net}
+      BLOSSOM_SERVER: ${BLOSSOM_SERVER:-https://blossom.primal.net}
+    volumes:
+      - ${PUBLISH_HOST_DIR:-/home/dietpi/Pubblica}:/pubblica
+      - publisher-data:/data
+
 volumes:
+  publisher-data:
   telegram-bot-api-data:
   ytdownloader-data:
   ytdownloader-downloads:

@@ -1,0 +1,6 @@
+anthropic
+faster-whisper
+requests
+PyYAML
+coincurve
+websockets
