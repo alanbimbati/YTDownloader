@@ -104,6 +104,19 @@ def _fetch(url: str):
     return requests.get(url, headers=headers, timeout=20)
 
 
+_NAVIGATION_HOSTS = ("maps.google.", "maps.app.goo.gl", "maps.apple.com", "waze.com", "openstreetmap.org",
+                     "osm.org", "wego.here.com", "share.here.com", "citymapper.com", "maps.me", "moovitapp.com")
+
+
+def is_navigation(url: str) -> bool:
+    """Map and directions links: sent to share a place, not to be read."""
+    parts = urlsplit(url)
+    host = (parts.hostname or "").removeprefix("www.")
+    if any(host == h or host.startswith(h) or host.endswith("." + h) for h in _NAVIGATION_HOSTS):
+        return True
+    return bool(re.match(r"(google\.[a-z.]+|goo\.gl)$", host)) and parts.path.startswith("/maps")
+
+
 def site_of(url: str) -> str:
     return (urlsplit(url).hostname or url).removeprefix("www.")
 

@@ -485,6 +485,8 @@ def _links_for(message: types.Message) -> list[str]:
     for ent in list(message.entities or []) + list(message.caption_entities or []):
         if getattr(ent, "url", ""):
             links.append(ent.url)
+    # Map links are shared to show a place: answering them would only be noise in the chat.
+    links = [l for l in links if not articles.is_navigation(l)]
     return list(dict.fromkeys(links))[:MAX_LINKS_PER_MESSAGE]
 
 
@@ -2467,6 +2469,8 @@ def _route_link(message: types.Message, url: str) -> None:
     # A shortened link hides where it leads, and whether it is a video at all.
     expanded = articles.expand(url)
     shortened, url = expanded != url, expanded
+    if articles.is_navigation(url):
+        return
     if _is_supported_url(url) or _url_temp_id(url) is not None:
         _route_video(message, url)
     elif storage.get_chat_settings(DB_PATH, message.chat.id)["articles"]:
