@@ -85,9 +85,27 @@ def _unwrap(url: str) -> str:
     return url
 
 
+_REFRESH = re.compile(r'http-equiv="refresh"\s+content="\d+;\s*URL=([^"]+)"', re.IGNORECASE)
+
+
+def _follow_refresh(url: str) -> str:
+    # Substack share links: a stub page redirecting in JavaScript; "r" is the sharer's referral id.
+    try:
+        found = _REFRESH.search(_fetch(url).text)
+    except Exception:
+        return url
+    if not found:
+        return url
+    target = urlsplit(lxml.html.fromstring(f"<p>{found.group(1)}</p>").text_content())
+    query = urlencode([(k, v) for k, v in parse_qsl(target.query) if k not in ("triedRedirect", "r")])
+    return urlunsplit(target._replace(query=query))
+
+
 def expand(url: str) -> str:
     """Where a shortened or bouncing link really leads; any other link, or one that cannot be followed, as is."""
     url = _unwrap(url)
+    if site_of(url) == "open.substack.com":
+        return _follow_refresh(url)
     if site_of(url) not in _SHORTENERS:
         return url
     try:
