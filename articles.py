@@ -135,6 +135,83 @@ def is_navigation(url: str) -> bool:
     return bool(re.match(r"(google\.[a-z.]+|goo\.gl)$", host)) and parts.path.startswith("/maps")
 
 
+class FeedEntry(NamedTuple):
+    id: str
+    link: str
+    title: str
+
+
+_FEED_TYPES = ("application/rss+xml", "application/atom+xml", "application/feed+json", "application/rdf+xml")
+_FEED_GUESSES = ("/feed", "/rss", "/feed.xml", "/rss.xml", "/atom.xml", "/index.xml", "/feeds/posts/default")
+
+
+def _local(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _parse_feed(content: bytes) -> Optional[tuple[str, list[FeedEntry]]]:
+    """(title, entries newest first) of an RSS 1/2 or Atom document; None if it is not one."""
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(content)
+    except ET.ParseError:
+        return None
+    if _local(root.tag) not in ("rss", "feed", "RDF"):
+        return None
+    child = lambda el, name: next((c for c in el if _local(c.tag) == name), None)
+    text = lambda el, name: ((child(el, name).text if child(el, name) is not None else "") or "").strip()
+    channel = child(root, "channel")
+    title = text(channel if channel is not None else root, "title")
+    entries = []
+    for el in root.iter():
+        if _local(el.tag) not in ("item", "entry"):
+            continue
+        link = text(el, "link")
+        if not link:
+            # Atom keeps the link in an attribute; rel="alternate" (or none) is the post itself.
+            links = [c for c in el if _local(c.tag) == "link" and c.get("rel", "alternate") == "alternate"]
+            link = links[0].get("href", "") if links else ""
+        if link:
+            entries.append(FeedEntry(text(el, "guid") or text(el, "id") or link, link, text(el, "title")))
+    return title, entries
+
+
+def discover_feed(url: str) -> Optional[tuple[str, str]]:
+    """(feed url, site title) for a site, any of its pages or a feed itself."""
+    resp = _fetch(url)
+    parsed = _parse_feed(resp.content) if resp.ok else None
+    if parsed:
+        return url, parsed[0] or site_of(url)
+    candidates = []
+    if resp.ok and "html" in resp.headers.get("content-type", ""):
+        page = lxml.html.fromstring(resp.content)
+        for link in page.xpath('//link[@rel="alternate"][@href]'):
+            href = urljoin(url, link.get("href"))
+            # Comment feeds are listed next to the posts' one, often before it.
+            if (link.get("type") or "").lower() in _FEED_TYPES and "comment" not in href.lower():
+                candidates.append(href)
+    root = urlunsplit(urlsplit(url)._replace(path="", query="", fragment=""))
+    candidates += [root + guess for guess in _FEED_GUESSES]
+    for candidate in dict.fromkeys(candidates):
+        try:
+            r = _fetch(candidate)
+        except Exception:
+            continue
+        parsed = _parse_feed(r.content) if r.ok else None
+        if parsed and parsed[1]:
+            return candidate, parsed[0] or site_of(url)
+    return None
+
+
+def feed_entries(feed_url: str) -> tuple[str, list[FeedEntry]]:
+    resp = _fetch(feed_url)
+    resp.raise_for_status()
+    parsed = _parse_feed(resp.content)
+    if parsed is None:
+        raise ValueError(f"Not a feed anymore: {feed_url}")
+    return parsed
+
+
 def site_of(url: str) -> str:
     return (urlsplit(url).hostname or url).removeprefix("www.")
 

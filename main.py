@@ -404,22 +404,25 @@ def _bitcoin_terms_in(info: dict) -> list[str]:
     return sorted(found)
 
 
-def _publish_to_channel(from_chat_id, msg_ids: list[int], sticker_file_id: Optional[str] = None) -> None:
-    try:
-        if not sticker_file_id:
-            sticker_set = bot.get_sticker_set("BitcoinPodcast")
-            if sticker_set.stickers:
-                sticker_file_id = sticker_set.stickers[0].file_id
-        if sticker_file_id:
-            bot.send_sticker(BITCOIN_CHANNEL, sticker_file_id)
-    except Exception:
-        pass
+def _publish_to_channel(from_chat_id, msg_ids: list[int], sticker_file_id: Optional[str] = None,
+                        target: Optional[str] = None) -> None:
+    target = target or BITCOIN_CHANNEL
+    # The BitcoinPodcast sticker is that channel's separator: other chats get the content alone.
+    if target == BITCOIN_CHANNEL:
+        try:
+            if not sticker_file_id:
+                sticker_set = bot.get_sticker_set("BitcoinPodcast")
+                sticker_file_id = sticker_set.stickers[0].file_id if sticker_set.stickers else None
+            if sticker_file_id:
+                bot.send_sticker(target, sticker_file_id)
+        except Exception:
+            pass
 
     for m_id in msg_ids:
         try:
-            bot.copy_message(BITCOIN_CHANNEL, from_chat_id, m_id)
+            bot.copy_message(target, from_chat_id, m_id)
         except Exception as e:
-            print(f"Pubblicazione sul canale fallita per {m_id}: {e}")
+            print(f"Pubblicazione su {target} fallita per {m_id}: {e}")
 
 
 def _propose_channel_publication(message: types.Message, title: str, terms: list[str], msg_ids: list[int]) -> None:
@@ -1897,18 +1900,20 @@ def _publish_commands() -> None:
 @bot.message_handler(func=lambda m: m.text == "➕ Nuova Iscrizione")
 def handle_btn_new_sub(message: types.Message) -> None:
     if not _ensure_authorized(message): return
-    msg = bot.reply_to(message, _append_sponsor("Incolla qui il link del canale YouTube a cui vuoi iscriverti\n(Oppure invia /annulla per annullare):", limit=TEXT_LIMIT, for_chat=message.chat.id), reply_markup=types.ForceReply())
+    msg = bot.reply_to(message, _append_sponsor("Incolla il link di un canale YouTube, oppure di un sito o di un suo articolo: "
+                                               "il feed RSS lo trovo io.\n(Oppure invia /annulla per annullare):",
+                                               limit=TEXT_LIMIT, for_chat=message.chat.id), reply_markup=types.ForceReply())
     bot.register_next_step_handler(msg, process_new_sub)
 
 def process_new_sub(message: types.Message) -> None:
     if not message.text or message.text.lower() == "/annulla":
         bot.reply_to(message, "Operazione annullata.", reply_markup=main_menu_keyboard(message.from_user.id))
         return
-    channel_url = _extract_supported_url(message.text or "") or (message.text or "").strip()
-    if not _is_supported_url(channel_url):
-         bot.reply_to(message, "Formato URL non valido.", reply_markup=main_menu_keyboard(message.from_user.id))
-         return
-    message.text = f"/sub {channel_url}"
+    links = _links_for(message)
+    if not links:
+        bot.reply_to(message, "Formato URL non valido.", reply_markup=main_menu_keyboard(message.from_user.id))
+        return
+    message.text = f"/sub {links[0]}"
     handle_sub(message)
 
 @bot.message_handler(func=lambda m: m.text == "📥 Le mie Iscrizioni")
@@ -2098,12 +2103,12 @@ def handle_sub(message: types.Message) -> None:
         return
     raw = (message.text or "").split(maxsplit=1)
     if len(raw) < 2 or not raw[1].strip():
-        bot.send_message(message.chat.id, _append_sponsor("Uso: /sub URL_CANALE_YOUTUBE", limit=TEXT_LIMIT, for_chat=message.chat.id), reply_to_message_id=_get_msg_id(message))
+        bot.send_message(message.chat.id, _append_sponsor("Uso: /sub LINK (canale YouTube o sito)", limit=TEXT_LIMIT, for_chat=message.chat.id), reply_to_message_id=_get_msg_id(message))
         return
-        
+
     url = _extract_supported_url(raw[1]) or raw[1].strip()
-    if not _is_supported_url(url):
-        bot.send_message(message.chat.id, _append_sponsor("Inserisci un URL valido.", limit=TEXT_LIMIT, for_chat=message.chat.id), reply_to_message_id=_get_msg_id(message))
+    if not _is_youtube(url):
+        _subscribe_feed(message, url if url.lower().startswith("http") else f"https://{url}")
         return
         
     # Get channel title
@@ -2120,6 +2125,34 @@ def handle_sub(message: types.Message) -> None:
         bot.send_message(message.chat.id, _append_sponsor(f"Iscrizione completata per: {title}\nRiceverai notifiche per i nuovi video.", limit=TEXT_LIMIT, for_chat=message.chat.id), reply_to_message_id=_get_msg_id(message))
     else:
         bot.send_message(message.chat.id, _append_sponsor("Sei già iscritto a questo canale.", limit=TEXT_LIMIT, for_chat=message.chat.id), reply_to_message_id=_get_msg_id(message))
+
+def _is_youtube(url: str) -> bool:
+    return bool(re.search(r"(?:^|//|\.)(?:youtube\.com|youtu\.be)/", url, re.IGNORECASE))
+
+
+def _subscribe_feed(message: types.Message, url: str) -> None:
+    reply = lambda text: bot.send_message(message.chat.id, _append_sponsor(text, limit=TEXT_LIMIT, for_chat=message.chat.id),
+                                          reply_to_message_id=_get_msg_id(message), disable_web_page_preview=True)
+    try:
+        found = articles.discover_feed(articles.expand(url))
+    except Exception as e:
+        print(f"Feed non trovato per {url}: {e}")
+        found = None
+    if not found:
+        reply("Su questo sito non trovo un feed RSS da seguire.")
+        return
+    feed_url, title = found
+    if storage.get_channel_id(DB_PATH, feed_url) != _FEED:
+        # From now on: what the feed already holds is not news.
+        _, entries = articles.feed_entries(feed_url)
+        storage.set_channel_id(DB_PATH, feed_url, _FEED)
+        storage.update_channel_state(DB_PATH, feed_url, entries[0].id if entries else "", channel_title=title)
+    if storage.add_subscription(DB_PATH, message.from_user.id, feed_url):
+        reply(f"📰 Iscrizione completata: {title}\nTi mando i nuovi articoli appena escono.\n"
+              "Per pubblicarli anche in un canale: 📥 Le mie Iscrizioni → 📢.")
+    else:
+        reply(f"Sei già iscritto a {title}.")
+
 
 @bot.message_handler(commands=["unsub"])
 def handle_unsub(message: types.Message) -> None:
@@ -2143,50 +2176,114 @@ def handle_mysubs(message: types.Message) -> None:
         return
     render_subs_page(message.chat.id, message.from_user.id, 0)
 
+def _chat_label(chat: str) -> str:
+    return storage.get_kv(DB_PATH, f"chat_title:{chat}") or chat
+
+
 def render_subs_page(chat_id: int, user_id: int, page: int, message_id_to_edit: Optional[int] = None) -> None:
     subs = storage.get_user_subscriptions_with_titles(DB_PATH, user_id)
     if not subs:
-        text = "Non sei iscritto a nessun canale. Usa ➕ Nuova Iscrizione per aggiungerne uno."
+        text = "Non hai iscrizioni. Usa ➕ Nuova Iscrizione per seguire un canale YouTube o un sito."
         if message_id_to_edit:
             bot.edit_message_text(text, chat_id, message_id_to_edit)
         else:
             bot.send_message(chat_id, text)
         return
-        
+
     per_page = 5
     total_pages = (len(subs) + per_page - 1) // per_page
-    if page >= total_pages: 
-        page = total_pages - 1
-    if page < 0: 
-        page = 0
-        
-    start_idx = page * per_page
-    end_idx = start_idx + per_page
-    page_subs = subs[start_idx:end_idx]
-    
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    for url, title in page_subs:
+    page = max(0, min(page, total_pages - 1))
+    page_subs = subs[page * per_page:(page + 1) * per_page]
+
+    kb = types.InlineKeyboardMarkup()
+    lines = []
+    for url, title, publish_to in page_subs:
         url_id = storage.save_url_cache(DB_PATH, url)
-        display_name = title[:30]
-        kb.add(types.InlineKeyboardButton(f"🗑️ Cancella {display_name}", callback_data=f"sub:rm:{url_id}:{page}"))
-        
+        icon = "📰" if storage.get_channel_id(DB_PATH, url) == _FEED else "🎬"
+        lines.append(f"{icon} {title}\n     📢 {_chat_label(publish_to) if publish_to else 'solo a te'}")
+        kb.row(types.InlineKeyboardButton(f"📢 {title[:22]}", callback_data=f"sub:pub:{url_id}:{page}"),
+               types.InlineKeyboardButton("🗑️", callback_data=f"sub:rm:{url_id}:{page}"))
+
     nav_buttons = []
     if page > 0:
         nav_buttons.append(types.InlineKeyboardButton("⬅️ Preced. ", callback_data=f"sub:pg:{page-1}"))
     if page < total_pages - 1:
         nav_buttons.append(types.InlineKeyboardButton("Successiva ➡️", callback_data=f"sub:pg:{page+1}"))
-        
     if nav_buttons:
         kb.row(*nav_buttons)
-        
-    text = f"Le tue iscrizioni (Pag {page+1}/{total_pages}):\nTotale canali seguiti: {len(subs)}"
+
+    text = (f"Le tue iscrizioni (pag {page+1}/{total_pages}, {len(subs)} in tutto)\n"
+            "📢 = dove pubblico in automatico le novità\n\n" + "\n".join(lines))
     try:
         if message_id_to_edit:
-            bot.edit_message_text(text, chat_id, message_id_to_edit, reply_markup=kb)
+            bot.edit_message_text(text, chat_id, message_id_to_edit, reply_markup=kb, disable_web_page_preview=True)
         else:
-            bot.send_message(chat_id, text, reply_markup=kb)
+            bot.send_message(chat_id, text, reply_markup=kb, disable_web_page_preview=True)
     except Exception as e:
-        pass
+        print(f"Lista iscrizioni non mostrata: {e}")
+
+
+def _render_publish_choice(chat_id: int, user_id: int, url_id: int, page: int, message_id: int) -> None:
+    url = storage.get_url_cache(DB_PATH, url_id)
+    subs = {u: (t, p) for u, t, p in storage.get_user_subscriptions_with_titles(DB_PATH, user_id)}
+    if url not in subs:
+        render_subs_page(chat_id, user_id, page, message_id)
+        return
+    title, current = subs[url]
+    known = [p for _, p in subs.values() if p]
+    if user_id == ADMIN_USER_ID:
+        known.append(BITCOIN_CHANNEL)
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for target in dict.fromkeys(known):
+        mark = "✅ " if target == current else ""
+        kb.add(types.InlineKeyboardButton(f"{mark}📢 {_chat_label(target)}", callback_data=f"sub:set:{url_id}:{page}:{target}"))
+    kb.add(types.InlineKeyboardButton("➕ Un altro canale o gruppo", callback_data=f"sub:new:{url_id}:{page}"))
+    kb.add(types.InlineKeyboardButton(("✅ " if not current else "") + "🙈 Solo a me", callback_data=f"sub:set:{url_id}:{page}:-"))
+    kb.add(types.InlineKeyboardButton("⬅️ Indietro", callback_data=f"sub:pg:{page}"))
+    bot.edit_message_text(f"Dove pubblico in automatico le novità di «{title}»?\n"
+                          "A te arrivano comunque in privato.", chat_id, message_id, reply_markup=kb)
+
+
+def _resolve_publish_target(message: types.Message) -> tuple[Optional[types.Chat], str]:
+    """The chat named in a reply (@name, t.me link, id or a forwarded post) and what is wrong with it, if anything."""
+    origin = getattr(message, "forward_origin", None)
+    chat = getattr(origin, "chat", None) or getattr(message, "forward_from_chat", None)
+    ref = None
+    if chat is None:
+        raw = (message.text or "").strip()
+        m = re.search(r"(?:t\.me/|@)([A-Za-z]\w{3,})", raw) or re.fullmatch(r"(-?\d+)", raw)
+        if not m:
+            return None, "Mandami l'@ del canale (es. @nomecanale) o inoltrami un suo messaggio."
+        ref = m.group(1) if m.group(1).lstrip("-").isdigit() else f"@{m.group(1)}"
+    try:
+        chat = bot.get_chat(chat.id if chat is not None else ref)
+        me = bot.get_chat_member(chat.id, bot.get_me().id)
+    except Exception:
+        return None, "Non trovo quella chat, o non ci sono dentro: aggiungimi prima come amministratore."
+    can_post = me.status == "administrator" and getattr(me, "can_post_messages", True) is not False
+    if chat.type == "channel" and not can_post:
+        return None, f"In {chat.title} non posso pubblicare: fammi amministratore con il permesso di pubblicare."
+    if chat.type != "channel" and me.status not in ("administrator", "member", "creator"):
+        return None, f"Non sono membro di {chat.title}: aggiungimi prima."
+    if not _is_chat_admin(chat.id, message.from_user.id):
+        return None, f"Solo gli amministratori di {chat.title} possono farmi pubblicare lì."
+    return chat, ""
+
+
+def process_publish_target(message: types.Message, url: str, page: int) -> None:
+    if (message.text or "").strip().lower() == "/annulla":
+        bot.reply_to(message, "Operazione annullata.")
+        return
+    chat, problem = _resolve_publish_target(message)
+    if chat is None:
+        bot.reply_to(message, problem)
+        return
+    storage.set_kv(DB_PATH, f"chat_title:{chat.id}", chat.title or str(chat.id))
+    storage.set_publish_to(DB_PATH, message.from_user.id, url, str(chat.id))
+    title = storage.get_channel_title(DB_PATH, url) or url
+    bot.reply_to(message, f"✅ Le novità di «{title}» le pubblico anche in {chat.title}.")
+    render_subs_page(message.chat.id, message.from_user.id, page)
+
 
 @bot.callback_query_handler(func=lambda c: (c.data or "").startswith("sub:"))
 def handle_sub_callbacks(call: types.CallbackQuery) -> None:
@@ -2194,7 +2291,28 @@ def handle_sub_callbacks(call: types.CallbackQuery) -> None:
         parts = call.data.split(":")
         action = parts[1]
         
-        if action == "pg":
+        if action == "pub":
+            _render_publish_choice(call.message.chat.id, call.from_user.id, int(parts[2]), int(parts[3]),
+                                   _get_msg_id(call.message))
+            bot.answer_callback_query(call.id)
+
+        elif action == "set":
+            url, page, target = storage.get_url_cache(DB_PATH, int(parts[2])), int(parts[3]), ":".join(parts[4:])
+            if url:
+                storage.set_publish_to(DB_PATH, call.from_user.id, url, "" if target == "-" else target)
+            bot.answer_callback_query(call.id, "Salvato")
+            render_subs_page(call.message.chat.id, call.from_user.id, page, _get_msg_id(call.message))
+
+        elif action == "new":
+            url, page = storage.get_url_cache(DB_PATH, int(parts[2])), int(parts[3])
+            bot.answer_callback_query(call.id)
+            msg = bot.send_message(call.message.chat.id,
+                                   "Mandami l'@ del canale o del gruppo (es. @nomecanale), oppure inoltrami un suo "
+                                   "messaggio. Devo esserne amministratore. /annulla per lasciar stare.",
+                                   reply_markup=types.ForceReply())
+            bot.register_next_step_handler(msg, process_publish_target, url, page)
+
+        elif action == "pg":
             page = int(parts[2])
             render_subs_page(call.message.chat.id, call.from_user.id, page, _get_msg_id(call.message))
             bot.answer_callback_query(call.id)
@@ -2218,13 +2336,13 @@ def handle_sub_callbacks(call: types.CallbackQuery) -> None:
 
 
 class DownloadTask:
-    def __init__(self, message: types.Message, url: str, mode: str = "B", auto_publish: bool = False,
+    def __init__(self, message: types.Message, url: str, mode: str = "B", publish_to: str = "",
                  from_subscription: bool = False, article_tried: bool = False):
         self.message = message
         self.article_tried = article_tried
         self.url = url
         self.mode = mode
-        self.auto_publish = auto_publish
+        self.publish_to = publish_to
         self.from_subscription = from_subscription
         self.first_seen = time.time()
         self.postponed = False
@@ -2416,16 +2534,35 @@ def _without_video(message: types.Message, url: str, error: Exception) -> bool:
     return False
 
 
+def _article_page(url: str) -> Optional[tuple[str, bool]]:
+    """The message for an article (its Telegraph page and source) and whether it is about bitcoin; None if not one."""
+    source = articles.clean_url(url)
+    known = storage.get_article(DB_PATH, source)
+    if known:
+        telegraph_url, title, is_bitcoin = known
+    else:
+        article = articles.fetch_article(url)
+        if not article:
+            return None
+        telegraph_url = articles.create_page(_telegraph_token(), article, source)
+        title = article.title
+        is_bitcoin = bool(_BITCOIN_RE.search(f"{article.title}\n{article.text}"))
+        storage.save_article(DB_PATH, source, telegraph_url, title, is_bitcoin)
+    text = (
+        f'<a href="{html.escape(telegraph_url)}">{html.escape(title, quote=False)}</a>\n\n'
+        f'via <a href="{html.escape(source)}">{html.escape(articles.site_of(source))}</a>'
+    )
+    return text, bool(is_bitcoin)
+
+
 def _send_article(message: types.Message, url: str, shortened: bool = False, video_tried: bool = False) -> None:
     in_group = message.chat.type != "private"
     source = articles.clean_url(url)
     try:
-        known = storage.get_article(DB_PATH, source)
-        if known:
-            telegraph_url, title, is_bitcoin = known
+        page = _article_page(url)
+        if page:
+            text, is_bitcoin = page
         else:
-            article = articles.fetch_article(url)
-            if not article:
                 # Not an article (a shop, a profile…): still worth handing back without its trackers.
                 cleaned = shortened or articles.has_trackers(url)
                 if cleaned:
@@ -2436,15 +2573,6 @@ def _send_article(message: types.Message, url: str, shortened: bool = False, vid
                 elif not cleaned and not in_group:
                     bot.reply_to(message, "Da questo link non riesco a ricavare né un articolo né un video.")
                 return
-            telegraph_url = articles.create_page(_telegraph_token(), article, source)
-            title = article.title
-            is_bitcoin = bool(_BITCOIN_RE.search(f"{article.title}\n{article.text}"))
-            storage.save_article(DB_PATH, source, telegraph_url, title, is_bitcoin)
-
-        text = (
-            f'<a href="{html.escape(telegraph_url)}">{html.escape(title, quote=False)}</a>\n\n'
-            f'via <a href="{html.escape(source)}">{html.escape(articles.site_of(source))}</a>'
-        )
         msg_id = _get_msg_id(message)
         bot.send_message(message.chat.id, _with_sponsor_html(text, message.chat.id), parse_mode="HTML",
                          reply_to_message_id=msg_id if msg_id and msg_id > 0 else None)
@@ -2785,9 +2913,9 @@ def _process_download(task: DownloadTask) -> None:
         elif hasattr(msg_audio, "message_id"): sent_ids.append(msg_audio.message_id)
 
         if sent_ids:
-            if task.auto_publish:
-                _publish_to_channel(message.chat.id, sent_ids, sticker_file_id)
-            else:
+            if task.publish_to:
+                _publish_to_channel(message.chat.id, sent_ids, sticker_file_id, target=task.publish_to)
+            elif not task.from_subscription:
                 # Tutto il resto sul canale ci va solo se lo approvi.
                 terms = _bitcoin_terms_in(info if "info" in locals() else info_preview)
                 if terms:
@@ -2852,6 +2980,7 @@ _FEED_NS = {"a": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xm
 
 
 _NO_CHANNEL = "-"
+_FEED = "rss"
 _GONE_RE = re.compile(r"Private video|Video unavailable|This video (?:has been removed|is no longer available)|"
                       r"account associated with this video has been terminated|does not exist", re.IGNORECASE)
 
@@ -2862,7 +2991,7 @@ def _channel_id_for(url: str) -> Optional[str]:
         return m.group(1)
     stored = storage.get_channel_id(DB_PATH, url)
     if stored:
-        return None if stored == _NO_CHANNEL else stored
+        return None if stored in (_NO_CHANNEL, _FEED) else stored
     # A subscription can be an @handle or the link of one of the channel's videos: resolved only once.
     try:
         with _ydl({"quiet": True, "noplaylist": True, "extract_flat": True, "playlistend": 1}) as ydl:
@@ -2918,6 +3047,9 @@ def poll_subscriptions():
         try:
             for channel_url in storage.get_distinct_subscribed_channels(DB_PATH):
                 try:
+                    if storage.get_channel_id(DB_PATH, channel_url) == _FEED:
+                        _poll_feed(channel_url)
+                        continue
                     channel_id = _channel_id_for(channel_url)
                     if not channel_id:
                         continue
@@ -2944,25 +3076,25 @@ def poll_subscriptions():
         time.sleep(600)  # Controlla ogni 10 minuti
 
 
+def _subscribers(channel_url: str) -> list[tuple[int, str]]:
+    # Whoever already started the new bot gets the news from there: from both it would arrive twice.
+    return [(u, p) for u, p in storage.get_subscribers(DB_PATH, channel_url)
+            if not (HANDOFF_DB and storage.is_known_user(HANDOFF_DB, u))]
+
+
 def notify_subscribers(channel_url: str, video_url: str, channel_title: Optional[str] = None):
-    subs = storage.get_all_subscriptions(DB_PATH)
-    target_users = [u for u, c in subs if c == channel_url]
-    if not target_users:
-        return
-        
     display_name = channel_title or channel_url
-    for user_id in target_users:
-        # Whoever already started the new bot gets the video from there: from both it would arrive twice.
-        if HANDOFF_DB and storage.is_known_user(HANDOFF_DB, user_id):
-            continue
+    published = set()
+    for user_id, publish_to in _subscribers(channel_url):
+        # Two subscribers publishing to the same chat would post the video there twice.
+        publish_to = "" if publish_to in published else publish_to
+        published.add(publish_to)
         try:
             text = f"🔔 Nuovo video dal canale {display_name}!\nVerrà scaricato automaticamente."
-            if user_id == ADMIN_USER_ID:
-                text += f"\nVideo e audio vanno anche su {BITCOIN_CHANNEL}."
+            if publish_to:
+                text += f"\nVideo e audio vanno anche su {_chat_label(publish_to)}."
             bot.send_message(user_id, _append_sponsor(text, limit=TEXT_LIMIT, for_chat=user_id))
-            
-            # Create a fake message object for the background download
-            # We use message_id=-1 or 0 to indicate a background task
+
             # de_json: Message's constructor changes signature across pyTelegramBotAPI versions.
             fake_message = types.Message.de_json({
                 "message_id": 0,
@@ -2973,14 +3105,58 @@ def notify_subscribers(channel_url: str, video_url: str, channel_title: Optional
             })
             mode = _media_mode(user_id)
             if mode:
-                download_queue.put(
-                    DownloadTask(fake_message, video_url, mode=mode, auto_publish=(user_id == ADMIN_USER_ID),
-                                 from_subscription=True)
-                )
+                download_queue.put(DownloadTask(fake_message, video_url, mode=mode, publish_to=publish_to,
+                                                from_subscription=True))
         except Exception as e:
             print(f"Errore nella notifica all'utente {user_id}: {e}")
 
 
+def _poll_feed(feed_url: str) -> None:
+    title, entries = articles.feed_entries(feed_url)
+    if not entries:
+        return
+    ids = [e.id for e in entries]
+    last_saved_id = storage.get_channel_state(DB_PATH, feed_url)
+    storage.update_channel_state(DB_PATH, feed_url, ids[0], channel_title=title or None)
+    # Same rule as the videos: without a recognisable last article only the starting point moves.
+    if last_saved_id not in ids:
+        return
+    for entry in reversed(entries[:ids.index(last_saved_id)][:5]):
+        print(f"[Polling] Nuovo articolo per {title or feed_url}: {entry.link}")
+        _deliver_feed_entry(feed_url, entry, title or articles.site_of(feed_url))
+
+
+def _deliver_feed_entry(feed_url: str, entry: "articles.FeedEntry", site: str) -> None:
+    try:
+        page = _article_page(entry.link)
+    except Exception as e:
+        print(f"Articolo del feed non convertito ({entry.link}): {e}")
+        _log_error("feed", entry.link, e)
+        page = None
+    text = page[0] if page else (f'<a href="{html.escape(entry.link)}">{html.escape(entry.title or entry.link, quote=False)}</a>'
+                                 f"\n\nvia {html.escape(site, quote=False)}")
+    targets = []
+    for user_id, publish_to in _subscribers(feed_url):
+        targets.append(user_id)
+        if publish_to:
+            targets.append(publish_to)
+    for chat in dict.fromkeys(targets):
+        try:
+            bot.send_message(chat, _with_sponsor_html(text, chat), parse_mode="HTML")
+        except Exception as e:
+            print(f"Articolo del feed non inviato a {chat}: {e}")
+            _log_error("feed", entry.link, e)
+
+
+def _migrate_publish_targets() -> None:
+    # Before the choice existed, every admin subscription went to the bitcoin channel: kept until changed.
+    if storage.get_kv(DB_PATH, "publish_to_v1"):
+        return
+    storage.set_publish_to_where_unset(DB_PATH, ADMIN_USER_ID, BITCOIN_CHANNEL)
+    storage.set_kv(DB_PATH, "publish_to_v1", "1")
+
+
+_migrate_publish_targets()
 poll_thread = threading.Thread(target=poll_subscriptions, daemon=True)
 poll_thread.start()
 

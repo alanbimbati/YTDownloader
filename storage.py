@@ -235,6 +235,12 @@ def init_db(db_path: str) -> None:
         except sqlite3.OperationalError:
             pass # already exists
 
+        # The chat where each subscription's new videos and articles are also published, if any.
+        try:
+            conn.execute("ALTER TABLE subscriptions ADD COLUMN publish_to TEXT")
+        except sqlite3.OperationalError:
+            pass # already exists
+
         try:
             conn.execute("ALTER TABLE cache ADD COLUMN fmt_v INTEGER NOT NULL DEFAULT 0")
         except sqlite3.OperationalError:
@@ -858,18 +864,42 @@ def get_user_subscriptions(db_path: str, user_id: int) -> list[str]:
         rows = conn.execute("SELECT channel_url FROM subscriptions WHERE user_id=?", (user_id,)).fetchall()
     return [r[0] for r in rows]
 
-def get_user_subscriptions_with_titles(db_path: str, user_id: int) -> list[tuple[str, str]]:
+def get_user_subscriptions_with_titles(db_path: str, user_id: int) -> list[tuple[str, str, str]]:
+    """(url, title, publish_to) for each of the user's subscriptions; publish_to is "" when there is none."""
     with _connect(db_path) as conn:
         rows = conn.execute(
             """
-            SELECT s.channel_url, cs.channel_title 
+            SELECT s.channel_url, cs.channel_title, s.publish_to
             FROM subscriptions s
             LEFT JOIN channels_state cs ON s.channel_url = cs.channel_url
             WHERE s.user_id = ?
             """,
             (user_id,)
         ).fetchall()
-    return [(r[0], r[1] or r[0]) for r in rows]
+    return [(r[0], r[1] or r[0], r[2] or "") for r in rows]
+
+
+def get_subscribers(db_path: str, channel_url: str) -> list[tuple[int, str]]:
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT user_id, publish_to FROM subscriptions WHERE channel_url=?", (channel_url,)
+        ).fetchall()
+    return [(r[0], r[1] or "") for r in rows]
+
+
+def set_publish_to(db_path: str, user_id: int, channel_url: str, publish_to: str) -> None:
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE subscriptions SET publish_to=? WHERE user_id=? AND channel_url=?",
+            (publish_to or None, user_id, channel_url),
+        )
+
+
+def set_publish_to_where_unset(db_path: str, user_id: int, publish_to: str) -> None:
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE subscriptions SET publish_to=? WHERE user_id=? AND publish_to IS NULL", (publish_to, user_id)
+        )
 
 
 def get_all_subscriptions(db_path: str) -> list[tuple[int, str]]:
