@@ -471,6 +471,12 @@ def _extract_supported_url(text: str) -> Optional[str]:
 MAX_LINKS_PER_MESSAGE = 10
 
 
+def _is_telegram_non_post(url: str) -> bool:
+    # Bot, profile and invite links: only t.me/<channel>/<post> can hold media.
+    return bool(re.match(r"https?://(?:www\.)?t\.me/", url, re.IGNORECASE)) and not re.match(
+        r"https?://(?:www\.)?t\.me/(?:s/|c/)?[\w-]+/\d+", url, re.IGNORECASE)
+
+
 def _links_for(message: types.Message) -> list[str]:
     # Any link is taken: a video goes to yt-dlp, which knows far more sites than the listed ones,
     # and anything else is read as an article.
@@ -486,7 +492,7 @@ def _links_for(message: types.Message) -> list[str]:
         if getattr(ent, "url", ""):
             links.append(ent.url)
     # Map links are shared to show a place: answering them would only be noise in the chat.
-    links = [l for l in links if not articles.is_navigation(l)]
+    links = [l for l in links if not articles.is_navigation(l) and not _is_telegram_non_post(l)]
     return list(dict.fromkeys(links))[:MAX_LINKS_PER_MESSAGE]
 
 
@@ -1237,6 +1243,8 @@ def _download_video(url: str, yt_id: str, audio_lang: Optional[str] = None) -> t
     ydl_preview_opts = {"quiet": True, "noplaylist": True}
     with _ydl(ydl_preview_opts) as ydl:
         info = ydl.extract_info(url, download=False)
+    if not info:
+        raise yt_dlp.utils.DownloadError("No video could be found in this link")
 
     fmt = _select_video_format_under_limit(info, EFFECTIVE_MAX_UPLOAD_BYTES, audio_lang)
     prefix = f"{yt_id}_video."
@@ -2386,9 +2394,15 @@ _NO_VIDEO_RE = re.compile(r"No video could be found|Unsupported URL|There'?s no 
                           r"Requested format is not available|no suitable formats", re.IGNORECASE)
 
 
+def _no_video(url: str, error: Exception) -> bool:
+    # Outside YouTube a broken extractor mostly means a page without video, such as a Substack text post.
+    return bool(_NO_VIDEO_RE.search(str(error))) or (
+        "Unable to extract" in str(error) and not re.search(r"(?://|\.)(?:youtube\.com|youtu\.be)/", url))
+
+
 def _without_video(message: types.Message, url: str, error: Exception) -> bool:
     """What a link with no video still has to give: a post's text and photos, an article, a clean link."""
-    if not _NO_VIDEO_RE.search(str(error)):
+    if not _no_video(url, error):
         return False
     try:
         if re.search(r"(?://|\.)(?:x|twitter)\.com/", url) and _send_tweet(message, url):
@@ -2593,6 +2607,9 @@ def _process_download(task: DownloadTask) -> None:
                     _postpone(task)
                     return
                 raise
+        if not info_preview:
+            # yt-dlp returns nothing at all for a post without media, such as a text-only t.me post.
+            raise yt_dlp.utils.DownloadError("No video could be found in this link")
         if task.from_subscription and info_preview.get("live_status") in ("is_live", "is_upcoming", "post_live"):
             _postpone(task)
             return
@@ -2780,11 +2797,10 @@ def _process_download(task: DownloadTask) -> None:
                     else:
                         _propose_channel_publication(message, title, terms, sent_ids)
 
-        if status:
-            bot.delete_message(message.chat.id, status.message_id)
-
     except Exception as e:
         if not task.from_subscription and not task.article_tried and _without_video(message, url, e):
+            return
+        if task.article_tried and in_group and _no_video(url, e):
             return
         _log_error("subscription" if task.from_subscription else "download", url, e, message.chat.type)
         msg_id = _get_msg_id(message)
@@ -2835,29 +2851,66 @@ def _process_download(task: DownloadTask) -> None:
 _FEED_NS = {"a": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015"}
 
 
+_NO_CHANNEL = "-"
+_GONE_RE = re.compile(r"Private video|Video unavailable|This video (?:has been removed|is no longer available)|"
+                      r"account associated with this video has been terminated|does not exist", re.IGNORECASE)
+
+
 def _channel_id_for(url: str) -> Optional[str]:
     m = re.search(r"/channel/(UC[\w-]{22})", url)
     if m:
         return m.group(1)
     stored = storage.get_channel_id(DB_PATH, url)
     if stored:
-        return stored
+        return None if stored == _NO_CHANNEL else stored
     # A subscription can be an @handle or the link of one of the channel's videos: resolved only once.
-    with _ydl({"quiet": True, "noplaylist": True, "extract_flat": True, "playlistend": 1}) as ydl:
-        info = ydl.extract_info(url, download=False)
+    try:
+        with _ydl({"quiet": True, "noplaylist": True, "extract_flat": True, "playlistend": 1}) as ydl:
+            info = ydl.extract_info(url, download=False) or {}
+    except Exception as e:
+        if not _GONE_RE.search(str(e)):
+            raise
+        # A private or deleted video never tells its channel: asking again every 10 minutes only adds errors.
+        storage.set_channel_id(DB_PATH, url, _NO_CHANNEL)
+        _warn_unfollowable(url)
+        return None
     cid = info.get("channel_id") or (info.get("id") if str(info.get("id", "")).startswith("UC") else None)
     if cid:
         storage.set_channel_id(DB_PATH, url, cid)
     return cid
 
 
+def _warn_unfollowable(url: str) -> None:
+    for user_id, channel_url in storage.get_all_subscriptions(DB_PATH):
+        if channel_url != url:
+            continue
+        try:
+            bot.send_message(user_id, f"⚠️ Non riesco a seguire questa iscrizione: il video è privato o rimosso, "
+                                      f"quindi non so di che canale sia.\n{url}\n"
+                                      "Iscriviti di nuovo col link del canale (es. youtube.com/@nome).",
+                             disable_web_page_preview=True)
+        except Exception as e:
+            print(f"Avviso iscrizione non inviato a {user_id}: {e}")
+
+
 def _feed_video_ids(channel_id: str) -> tuple[list[str], Optional[str]]:
     # The RSS feed is light and skips the bot check that blocks the channel pages.
-    r = requests.get(f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}", timeout=20)
-    r.raise_for_status()
+    try:
+        r = requests.get(f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}", timeout=20)
+        r.raise_for_status()
+    except requests.RequestException:
+        # YouTube's feeds go down for days at a time (404/500 for every channel): the channel page still works.
+        return _channel_page_video_ids(channel_id)
     root = ET.fromstring(r.content)
     ids = [e.findtext("yt:videoId", namespaces=_FEED_NS) for e in root.findall("a:entry", _FEED_NS)]
     return [i for i in ids if i], root.findtext("a:title", namespaces=_FEED_NS)
+
+
+def _channel_page_video_ids(channel_id: str) -> tuple[list[str], Optional[str]]:
+    with _ydl({"quiet": True, "extract_flat": True, "playlistend": 10}) as ydl:
+        info = ydl.extract_info(f"https://www.youtube.com/channel/{channel_id}/videos", download=False) or {}
+    ids = [e.get("id") for e in info.get("entries") or [] if e]
+    return [i for i in ids if i], info.get("channel") or info.get("uploader")
 
 
 def poll_subscriptions():
