@@ -2,6 +2,8 @@ services:
   telegram-bot-api:
     image: aiogram/telegram-bot-api:latest
     restart: unless-stopped
+    mem_limit: ${BOT_API_MEM_LIMIT:-512m}
+    memswap_limit: ${BOT_API_MEM_LIMIT:-512m}
     ports:
       - "127.0.0.1:8081:8081"
     environment:
@@ -14,14 +16,13 @@ services:
       - ytdownloader-downloads:/downloads/ytdownloader
       - ortixify-downloads:/downloads/ortixify
 
-  # @MyYTDowbloaderbot: replaced by @OrtixifyBot, kept running so its users are not cut off.
+  # @MyYTDowbloaderbot: replaced by @OrtixifyBot, only tells its users where to go (a full copy cost ~250 MB).
   ytdownloader-bot:
     build: .
+    command: ["python", "redirect_bot.py"]
     restart: unless-stopped
-    # A download that runs away (ffmpeg on a long video) must kill this container, not starve the whole Pi
-    # into swapping until even ssh stops answering. No extra swap either: swapping is how the Pi froze.
-    mem_limit: ${BOT_MEM_LIMIT:-1g}
-    memswap_limit: ${BOT_MEM_LIMIT:-1g}
+    mem_limit: 160m
+    memswap_limit: 160m
     depends_on:
       - telegram-bot-api
     environment: &bot-env
@@ -47,6 +48,7 @@ services:
   ortixify-bot:
     build: .
     restart: unless-stopped
+    # A download that runs away (ffmpeg on a long video) must kill this container, not starve the whole Pi.
     mem_limit: ${BOT_MEM_LIMIT:-1g}
     memswap_limit: ${BOT_MEM_LIMIT:-1g}
     depends_on:
