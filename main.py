@@ -480,11 +480,21 @@ def _is_telegram_non_post(url: str) -> bool:
         r"https?://(?:www\.)?t\.me/(?:s/|c/)?[\w-]+/\d+", url, re.IGNORECASE)
 
 
+def _from_a_channel(message: types.Message) -> bool:
+    # What the bot itself published in a channel comes back from there with its source link: taking it loops.
+    origin = getattr(message, "forward_origin", None)
+    origin_chat = getattr(origin, "chat", None) or getattr(message, "forward_from_chat", None)
+    forwarded_bot = getattr(getattr(origin, "sender_user", None) or message.forward_from, "is_bot", False)
+    return bool(message.chat.type == "channel" or getattr(message, "is_automatic_forward", False)
+                or getattr(origin_chat, "type", "") == "channel" or forwarded_bot or message.via_bot
+                or getattr(message.sender_chat, "type", "") == "channel")
+
+
 def _links_for(message: types.Message) -> list[str]:
     # Any link is taken: a video goes to yt-dlp, which knows far more sites than the listed ones,
     # and anything else is read as an article.
     text = message.text or message.caption or ""
-    if text.startswith("/"):
+    if text.startswith("/") or (message.chat.type != "private" and _from_a_channel(message)):
         return []
     links = []
     for raw in _URL_RE.findall(text):
@@ -1655,7 +1665,6 @@ def _is_chat_admin(chat_id: int, user_id: int) -> bool:
 
 @bot.message_handler(commands=["config", "impostazioni"])
 @bot.message_handler(func=lambda m: m.text == "⚙️ Impostazioni")
-@bot.channel_post_handler(commands=["config", "impostazioni"])
 def handle_settings(message: types.Message) -> None:
     if message.chat.type != "private":
         # In a channel, or from an anonymous admin, the chat itself is the sender: only its admins can do that.
@@ -2584,15 +2593,6 @@ def _send_article(message: types.Message, url: str, shortened: bool = False, vid
         _log_error("article", url, e, message.chat.type)
         if not in_group:
             bot.reply_to(message, "Non riesco a leggere questo articolo.")
-
-
-@bot.channel_post_handler(
-    content_types=["text", "photo", "video", "animation", "document"],
-    func=lambda m: bool(_links_for(m)),
-)
-def handle_channel_download(message: types.Message) -> None:
-    for url in _links_for(message):
-        _route_link(message, url)
 
 
 @bot.message_handler(
