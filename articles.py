@@ -203,6 +203,18 @@ def discover_feed(url: str) -> Optional[tuple[str, str]]:
     return None
 
 
+def parse_opml(content: bytes) -> list[tuple[str, str]]:
+    """(feed url, title) of each feed in an OPML export, the format feed readers such as Feeder share."""
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(content)
+    feeds = []
+    for outline in root.iter("outline"):
+        url = (outline.get("xmlUrl") or outline.get("xmlurl") or "").strip()
+        if url.startswith("http"):
+            feeds.append((url, (outline.get("title") or outline.get("text") or "").strip()))
+    return list(dict.fromkeys(feeds))
+
+
 def feed_entries(feed_url: str) -> tuple[str, list[FeedEntry]]:
     resp = _fetch(feed_url)
     resp.raise_for_status()

@@ -1913,11 +1913,15 @@ def _publish_commands() -> None:
 def handle_btn_new_sub(message: types.Message) -> None:
     if not _ensure_authorized(message): return
     msg = bot.reply_to(message, _append_sponsor("Incolla il link di un canale YouTube, oppure di un sito o di un suo articolo: "
-                                               "il feed RSS lo trovo io.\n(Oppure invia /annulla per annullare):",
+                                               "il feed RSS lo trovo io.\nPer portare tutti i feed da un'altra app (es. Feeder), mandami il suo "
+                                               "file OPML esportato.\n(Oppure invia /annulla per annullare):",
                                                limit=TEXT_LIMIT, for_chat=message.chat.id), reply_markup=types.ForceReply())
     bot.register_next_step_handler(msg, process_new_sub)
 
 def process_new_sub(message: types.Message) -> None:
+    if message.document:
+        handle_opml(message)
+        return
     if not message.text or message.text.lower() == "/annulla":
         bot.reply_to(message, "Operazione annullata.", reply_markup=main_menu_keyboard(message.from_user.id))
         return
@@ -2142,6 +2146,70 @@ def _is_youtube(url: str) -> bool:
     return bool(re.search(r"(?:^|//|\.)(?:youtube\.com|youtu\.be)/", url, re.IGNORECASE))
 
 
+def _add_feed(user_id: int, feed_url: str, title: str) -> bool:
+    """Subscribes the user to a feed; False if already subscribed. Raises if the feed cannot be read."""
+    if storage.get_channel_id(DB_PATH, feed_url) != _FEED:
+        # From now on: what the feed already holds is not news.
+        feed_title, entries = articles.feed_entries(feed_url)
+        storage.set_channel_id(DB_PATH, feed_url, _FEED)
+        storage.update_channel_state(DB_PATH, feed_url, entries[0].id if entries else "",
+                                     channel_title=title or feed_title or articles.site_of(feed_url))
+    return storage.add_subscription(DB_PATH, user_id, feed_url)
+
+
+_YT_FEED_RE = re.compile(r"youtube\.com/feeds/videos\.xml\?channel_id=(UC[\w-]{22})")
+
+
+def _telegram_file(file_id: str) -> bytes:
+    info = bot.get_file(file_id)
+    # The local Bot API server hands back a path on its own disk, mounted read-only here.
+    if os.path.isabs(info.file_path) and os.path.exists(info.file_path):
+        with open(info.file_path, "rb") as f:
+            return f.read()
+    return bot.download_file(info.file_path)
+
+
+@bot.message_handler(content_types=["document"], func=lambda m: m.chat.type == "private" and m.document
+                     and (m.document.file_name or "").lower().endswith((".opml", ".xml")))
+def handle_opml(message: types.Message) -> None:
+    try:
+        feeds = articles.parse_opml(_telegram_file(message.document.file_id))
+    except Exception as e:
+        print(f"OPML non letto: {e}")
+        feeds = []
+    if not feeds:
+        bot.reply_to(message, "In questo file non trovo feed. Mandami l'esportazione OPML del tuo lettore "
+                              "(in Feeder: Impostazioni → Esporta feed).")
+        return
+    bot.reply_to(message, f"📥 Importo {len(feeds)} feed: ci vuole qualche minuto, ti scrivo quando ho finito.")
+    threading.Thread(target=_import_feeds, args=(message, feeds), daemon=True).start()
+
+
+def _import_feeds(message: types.Message, feeds: list[tuple[str, str]]) -> None:
+    added, already, failed = 0, 0, []
+    for url, title in feeds:
+        try:
+            youtube = _YT_FEED_RE.search(url)
+            if youtube:
+                # A channel's feed becomes an ordinary YouTube subscription: its videos get downloaded.
+                channel_url = f"https://www.youtube.com/channel/{youtube.group(1)}"
+                storage.update_channel_state(DB_PATH, channel_url, channel_title=title or None)
+                new = storage.add_subscription(DB_PATH, message.from_user.id, channel_url)
+            else:
+                new = _add_feed(message.from_user.id, url, title)
+            added, already = added + new, already + (not new)
+        except Exception as e:
+            print(f"Feed non importato ({url}): {e}")
+            failed.append(title or url)
+    text = f"✅ Import finito: {added} nuove iscrizioni"
+    if already:
+        text += f", {already} le avevi già"
+    if failed:
+        text += f".\n❌ Non leggibili ({len(failed)}): " + ", ".join(failed[:15]) + (" …" if len(failed) > 15 else "")
+    text += "\n\nPer pubblicarle in un canale: 📥 Le mie Iscrizioni → 📢."
+    bot.send_message(message.chat.id, text[:TEXT_LIMIT], disable_web_page_preview=True)
+
+
 def _subscribe_feed(message: types.Message, url: str) -> None:
     reply = lambda text: bot.send_message(message.chat.id, _append_sponsor(text, limit=TEXT_LIMIT, for_chat=message.chat.id),
                                           reply_to_message_id=_get_msg_id(message), disable_web_page_preview=True)
@@ -2154,12 +2222,7 @@ def _subscribe_feed(message: types.Message, url: str) -> None:
         reply("Su questo sito non trovo un feed RSS da seguire.")
         return
     feed_url, title = found
-    if storage.get_channel_id(DB_PATH, feed_url) != _FEED:
-        # From now on: what the feed already holds is not news.
-        _, entries = articles.feed_entries(feed_url)
-        storage.set_channel_id(DB_PATH, feed_url, _FEED)
-        storage.update_channel_state(DB_PATH, feed_url, entries[0].id if entries else "", channel_title=title)
-    if storage.add_subscription(DB_PATH, message.from_user.id, feed_url):
+    if _add_feed(message.from_user.id, feed_url, title):
         reply(f"📰 Iscrizione completata: {title}\nTi mando i nuovi articoli appena escono.\n"
               "Per pubblicarli anche in un canale: 📥 Le mie Iscrizioni → 📢.")
     else:

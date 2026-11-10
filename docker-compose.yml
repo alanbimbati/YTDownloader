@@ -65,6 +65,8 @@ services:
     volumes:
       - ytdownloader-data:/data
       - ortixify-downloads:/downloads/ortixify
+      # Files sent to the bot (an OPML to import) are read where the local Bot API server saved them.
+      - telegram-bot-api-data:/var/lib/telegram-bot-api:ro
 
   # Publishes the video pairs dropped in ~/Pubblica (Syncthing) once post.yaml is approved; notifies through @OrtixifyBot.
   publisher:
