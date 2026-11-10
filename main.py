@@ -405,7 +405,7 @@ def _bitcoin_terms_in(info: dict) -> list[str]:
 
 
 def _publish_to_channel(from_chat_id, msg_ids: list[int], sticker_file_id: Optional[str] = None,
-                        target: Optional[str] = None) -> None:
+                        target: Optional[str] = None) -> bool:
     target = target or BITCOIN_CHANNEL
     # The BitcoinPodcast sticker is that channel's separator: other chats get the content alone.
     if target == BITCOIN_CHANNEL:
@@ -418,11 +418,14 @@ def _publish_to_channel(from_chat_id, msg_ids: list[int], sticker_file_id: Optio
         except Exception:
             pass
 
+    published = True
     for m_id in msg_ids:
         try:
             bot.copy_message(target, from_chat_id, m_id)
         except Exception as e:
+            published = False
             print(f"Pubblicazione su {target} fallita per {m_id}: {e}")
+    return published
 
 
 def _propose_channel_publication(message: types.Message, title: str, terms: list[str], msg_ids: list[int]) -> None:
@@ -2719,7 +2722,7 @@ def _process_download(task: DownloadTask) -> None:
 
     try:
         msg_id = _get_msg_id(message)
-        if not in_group:
+        if not in_group and not task.from_subscription:
             status = bot.send_message(
                 message.chat.id,
                 _append_sponsor("⏳ Sto preparando download e invio…", limit=TEXT_LIMIT, for_chat=message.chat.id),
@@ -2754,12 +2757,13 @@ def _process_download(task: DownloadTask) -> None:
 
         # Send the sticker to the user
         sticker_file_id = None
+        sticker_msg = None
         try:
             sticker_set = bot.get_sticker_set("BitcoinPodcast")
             if sticker_set.stickers:
                 sticker_file_id = sticker_set.stickers[0].file_id
                 if show["sticker"]:
-                    bot.send_sticker(message.chat.id, sticker_file_id, message_thread_id=topic)
+                    sticker_msg = bot.send_sticker(message.chat.id, sticker_file_id, message_thread_id=topic)
         except Exception:
             pass
 
@@ -2914,7 +2918,13 @@ def _process_download(task: DownloadTask) -> None:
 
         if sent_ids:
             if task.publish_to:
-                _publish_to_channel(message.chat.id, sent_ids, sticker_file_id, target=task.publish_to)
+                # The private copy only served to send it there: seen once, in the channel.
+                if _publish_to_channel(message.chat.id, sent_ids, sticker_file_id, target=task.publish_to):
+                    for m_id in sent_ids + ([sticker_msg.message_id] if sticker_msg else []):
+                        try:
+                            bot.delete_message(message.chat.id, m_id)
+                        except Exception as e:
+                            print(f"Copia privata {m_id} non cancellata: {e}")
             elif not task.from_subscription:
                 # Tutto il resto sul canale ci va solo se lo approvi.
                 terms = _bitcoin_terms_in(info if "info" in locals() else info_preview)
@@ -3083,18 +3093,12 @@ def _subscribers(channel_url: str) -> list[tuple[int, str]]:
 
 
 def notify_subscribers(channel_url: str, video_url: str, channel_title: Optional[str] = None):
-    display_name = channel_title or channel_url
     published = set()
     for user_id, publish_to in _subscribers(channel_url):
         # Two subscribers publishing to the same chat would post the video there twice.
         publish_to = "" if publish_to in published else publish_to
         published.add(publish_to)
         try:
-            text = f"🔔 Nuovo video dal canale {display_name}!\nVerrà scaricato automaticamente."
-            if publish_to:
-                text += f"\nVideo e audio vanno anche su {_chat_label(publish_to)}."
-            bot.send_message(user_id, _append_sponsor(text, limit=TEXT_LIMIT, for_chat=user_id))
-
             # de_json: Message's constructor changes signature across pyTelegramBotAPI versions.
             fake_message = types.Message.de_json({
                 "message_id": 0,
@@ -3137,9 +3141,7 @@ def _deliver_feed_entry(feed_url: str, entry: "articles.FeedEntry", site: str) -
                                  f"\n\nvia {html.escape(site, quote=False)}")
     targets = []
     for user_id, publish_to in _subscribers(feed_url):
-        targets.append(user_id)
-        if publish_to:
-            targets.append(publish_to)
+        targets.append(publish_to or user_id)
     for chat in dict.fromkeys(targets):
         try:
             bot.send_message(chat, _with_sponsor_html(text, chat), parse_mode="HTML")
